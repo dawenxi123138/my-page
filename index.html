@@ -1,0 +1,2821 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>阿福公益｜Web3 透明捐赠信息枢纽（原型）</title>
+  <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+  <style>
+    :root{color-scheme: light;}
+    .safe-bottom{padding-bottom: env(safe-area-inset-bottom);}
+    .no-scrollbar::-webkit-scrollbar{display:none;}
+    .no-scrollbar{-ms-overflow-style:none;scrollbar-width:none;}
+    .glass{backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);}
+    .tap{ -webkit-tap-highlight-color: transparent; }
+    .fade-in{animation: fadeIn .15s ease-out;}
+    @keyframes fadeIn{from{opacity:.0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+  </style>
+</head>
+<body class="bg-slate-50 text-slate-900">
+  <div id="app" class="min-h-dvh flex flex-col">
+    <!-- Header -->
+    <header class="sticky top-0 z-40 bg-white/80 glass border-b border-slate-200">
+      <div class="max-w-md mx-auto px-4 py-3 flex items-center gap-3">
+        <div class="w-9 h-9 rounded-xl bg-gradient-to-br from-emerald-500 to-sky-500 flex items-center justify-center text-white font-bold">福</div>
+        <div class="flex-1">
+          <div class="flex items-center gap-2">
+            <h1 class="text-base font-semibold leading-tight">阿福公益</h1>
+            <span id="netBadge" class="text-[11px] px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200">离线演示</span>
+          </div>
+          <p class="text-xs text-slate-500 leading-tight">透明可追溯 · 信息互通 · 资产专业管理（原型）</p>
+        </div>
+        <button id="btnSearch" class="tap p-2 rounded-xl hover:bg-slate-100" title="搜索/快捷">
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" class="w-5 h-5 text-slate-700">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-4.35-4.35m1.35-5.65a7 7 0 11-14 0 7 7 0 0114 0z"/>
+          </svg>
+        </button>
+        <button id="btnInbox" class="tap relative p-2 rounded-xl hover:bg-slate-100" title="消息">
+          <span id="inboxDot" class="hidden absolute top-1.5 right-1.5 w-2.5 h-2.5 bg-rose-500 rounded-full"></span>
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" class="w-5 h-5 text-slate-700">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 8h10M7 12h6m5 9H6a2 2 0 01-2-2V7a2 2 0 012-2h12a2 2 0 012 2v12a2 2 0 01-2 2z"/>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Main -->
+    <main class="flex-1">
+      <div class="max-w-md mx-auto px-4 py-4 space-y-4" id="view"></div>
+    </main>
+
+    <!-- Bottom Nav -->
+    <nav class="sticky bottom-0 z-40 bg-white/90 glass border-t border-slate-200 safe-bottom">
+      <div class="max-w-md mx-auto px-2 py-2 grid grid-cols-4 gap-1" id="bottomNav"></div>
+    </nav>
+  </div>
+
+  <!-- Modal root -->
+  <div id="modalRoot" class="fixed inset-0 z-50 hidden"></div>
+
+  <script>
+    // ============ Utilities ============
+    const $ = (sel, root=document) => root.querySelector(sel);
+    const $$ = (sel, root=document) => Array.from(root.querySelectorAll(sel));
+
+    const fmt = {
+      dt(ts){
+        const d = new Date(ts);
+        const pad = (n)=> String(n).padStart(2,'0');
+        return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+      },
+      shortHash(h){ return h ? (h.slice(0,10)+'…'+h.slice(-6)) : '-'; },
+      num(n){ return new Intl.NumberFormat('zh-CN').format(n); }
+    };
+
+    function uid(prefix='id'){
+      return `${prefix}_${Math.random().toString(16).slice(2)}_${Date.now().toString(16)}`;
+    }
+
+    // Simple, deterministic hash for demo (NOT cryptographically secure)
+    function demoHash(input){
+      let str = typeof input === 'string' ? input : JSON.stringify(input);
+      let h1 = 0xdeadbeef ^ str.length;
+      let h2 = 0x41c6ce57 ^ str.length;
+      for (let i=0;i<str.length;i++){
+        const ch = str.charCodeAt(i);
+        h1 = Math.imul(h1 ^ ch, 2654435761);
+        h2 = Math.imul(h2 ^ ch, 1597334677);
+      }
+      h1 = (h1 ^ (h1 >>> 16)) >>> 0;
+      h2 = (h2 ^ (h2 >>> 13)) >>> 0;
+      return (h1.toString(16).padStart(8,'0') + h2.toString(16).padStart(8,'0') + (Date.now()>>>0).toString(16).padStart(8,'0')).slice(0, 32);
+    }
+
+    function escapeHtml(s){
+      return String(s ?? '')
+        .replaceAll('&','&amp;')
+        .replaceAll('<','&lt;')
+        .replaceAll('>','&gt;')
+        .replaceAll('"','&quot;')
+        .replaceAll("'",'&#39;');
+    }
+
+    function clamp(n, a, b){ return Math.max(a, Math.min(b, n)); }
+
+    // ============ Persistent Store ============
+    const STORE_KEY = 'afu_public_good_v1';
+
+    const DEFAULTS = {
+      meta: { version: 1, createdAt: Date.now() },
+      i18n: { lang: 'zh' },
+      user: {
+        id: 'u_demo',
+        nickname: '来访者',
+        signature: '让善意可见，让信任可验证。',
+        verifiedRealName: false,
+        realName: '',
+        points: 28,
+        likes: 3,
+        witness: { status: 'none', submittedAt: null, reason: '' },
+        badges: ['新手公益人'],
+      },
+      addresses: [
+        { id: 'addr_1', label: '家', receiver: '来访者', phone: '138****0000', detail: 'XX省XX市XX区XX路88号', isDefault: true, updatedAt: Date.now() },
+      ],
+      favorites: [],
+      notifications: [
+        { id: 'n1', title: '欢迎体验阿福公益原型', body: '这是一个离线演示原型：展示信息枢纽、排队、公示式“链上追溯”、应急对接、见证人认证与酬赏等流程。', time: Date.now()-3600*1000, read: false, type: 'system' },
+        { id: 'n2', title: '提示：平台不直接接受现金捐助', body: '现金捐助请进入“捐赠基金管理”入口（原型仅展示）。', time: Date.now()-1800*1000, read: false, type: 'policy' },
+      ],
+      ledger: [],
+      queue: { entries: [] },
+      posts: {
+        donations: [], // non-cash donations
+        requests: [],  // needs
+        emergencyPledges: [],
+      },
+      claims: [],
+      loveTracks: [
+        { id: 't1', title: '爱心足迹：山村助学物资签收', by: '爱心使者·小林', location: '贵州·黔东南', time: Date.now()-86400*1000*2, coords: [26.58, 107.98], note: '协助老人线上领取物资并完成签收。' },
+        { id: 't2', title: '爱心足迹：灾后临时安置点物资核验', by: '爱心使者·阿杰', location: '甘肃·临夏', time: Date.now()-86400*1000*7, coords: [35.60, 103.21], note: '对接应急物资，完成点验与分发拍照存证。' },
+      ],
+      stations: [
+        { id: 's1', name: '阿福公益驿站·杭州站', city: '杭州', status: '运营中', services: ['物资中转','应急对接','志愿者集结'], updatedAt: Date.now()-86400*1000*3 },
+        { id: 's2', name: '阿福公益驿站·成都站', city: '成都', status: '筹备中', services: ['社区帮扶','企业项目联动'], updatedAt: Date.now()-86400*1000*10 },
+      ],
+      emergency: [
+        { id: 'e1', title: '暴雨应急：临时安置点生活物资', location: '某省·某市', level: '红色', needed: ['矿泉水','方便食品','雨衣','应急灯'], updatedAt: Date.now()-3600*1000*6, people: 1200 },
+        { id: 'e2', title: '地震应急：儿童保暖与医疗用品', location: '某省·某县', level: '橙色', needed: ['保暖毯','儿童衣物','消毒用品','止痛药（合规）'], updatedAt: Date.now()-3600*1000*18, people: 450 },
+      ],
+      beneficiaries: [
+        { id: 'b1', name: '小雨', age: 9, location: '云南·怒江', tags: ['助学','山区'], avatar: 'https://images.unsplash.com/photo-1520975958225-e5b7431bdfc9?auto=format&fit=crop&w=600&q=60' },
+        { id: 'b2', name: '阿良', age: 12, location: '贵州·毕节', tags: ['助学','留守'], avatar: 'https://images.unsplash.com/photo-1520975682032-6a5c79f8a2e8?auto=format&fit=crop&w=600&q=60' },
+        { id: 'b3', name: '阿莲', age: 36, location: '四川·凉山', tags: ['医疗','困难家庭'], avatar: 'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?auto=format&fit=crop&w=600&q=60' },
+        { id: 'b4', name: '老周', age: 71, location: '河南·周口', tags: ['助老','慢病'], avatar: 'https://images.unsplash.com/photo-1488426862026-3ee34a7d66df?auto=format&fit=crop&w=600&q=60' },
+      ],
+      demoNeedCards: [
+        { id: 'r_demo1', title: '急需：冬季保暖衣物（成人/儿童）', type: '物资', location: '四川·凉山', cover: 'https://images.unsplash.com/photo-1489515217757-5fd1be406fef?auto=format&fit=crop&w=800&q=60', desc: '山区气温骤降，急需保暖衣物，尺码可混装。可接收快递或就近驿站中转。', urgency: '高', createdAt: Date.now()-86400*1000*1.6, createdBy: '爱心使者·阿杰', verified: true, allowFeedback: true },
+        { id: 'r_demo2', title: '需要：法律咨询服务（劳动纠纷）', type: '服务', location: '江苏·宿迁', cover: 'https://images.unsplash.com/photo-1450101215322-bf5cd27642fc?auto=format&fit=crop&w=800&q=60', desc: '因工伤赔付产生争议，寻求专业律师提供一次咨询与材料指导。', urgency: '中', createdAt: Date.now()-86400*1000*4.2, createdBy: '受捐人·匿名', verified: false, allowFeedback: false },
+        { id: 'r_demo3', title: '求助：二手学习机/平板（可学习用途）', type: '智慧', location: '云南·怒江', cover: 'https://images.unsplash.com/photo-1518779578993-ec3579fee39f?auto=format&fit=crop&w=800&q=60', desc: '用于线上课程学习，网络条件一般，设备能正常使用即可。', urgency: '中', createdAt: Date.now()-86400*1000*8.8, createdBy: '爱心使者·小林', verified: true, allowFeedback: true },
+      ]
+    };
+
+    function loadStore(){
+      try{
+        const raw = localStorage.getItem(STORE_KEY);
+        if(!raw) return structuredClone(DEFAULTS);
+        const parsed = JSON.parse(raw);
+        // Basic merge, keep new defaults if missing
+        return deepMerge(structuredClone(DEFAULTS), parsed);
+      }catch(e){
+        console.warn('loadStore failed', e);
+        return structuredClone(DEFAULTS);
+      }
+    }
+
+    function saveStore(){
+      localStorage.setItem(STORE_KEY, JSON.stringify(store));
+    }
+
+    function deepMerge(target, source){
+      if(source === null || source === undefined) return target;
+      if(Array.isArray(target) && Array.isArray(source)) return source; // arrays replaced
+      if(typeof target !== 'object' || typeof source !== 'object') return source;
+      for(const k of Object.keys(source)){
+        if(k in target){
+          target[k] = deepMerge(target[k], source[k]);
+        } else {
+          target[k] = source[k];
+        }
+      }
+      return target;
+    }
+
+    let store = loadStore();
+
+    // ============ Ledger / Notifications / Rewards ============
+    function addNotification({title, body, type='info'}){
+      store.notifications.unshift({ id: uid('n'), title, body, time: Date.now(), read: false, type });
+      saveStore();
+    }
+
+    function addLedger({action, payload, visibility='public'}){
+      const record = {
+        id: uid('tx'),
+        time: Date.now(),
+        action,
+        visibility,
+        payload,
+      };
+      record.hash = demoHash(record);
+      store.ledger.unshift(record);
+      saveStore();
+      return record;
+    }
+
+    function addPoints(delta, reason){
+      store.user.points = Math.max(0, (store.user.points||0) + delta);
+      addNotification({
+        title: `酬赏 +${delta} 爱心值`,
+        body: reason,
+        type: 'reward'
+      });
+      addLedger({ action: 'reward.points', payload: { delta, reason, userId: store.user.id } });
+      if(delta >= 10 && !store.user.badges.includes('公益行动派')) store.user.badges.push('公益行动派');
+      saveStore();
+    }
+
+    // ============ Router ============
+    const TABS = [
+      { key:'home', label:'首页', icon: 'home' },
+      { key:'land', label:'爱心福地', icon: 'heart' },
+      { key:'publish', label:'发布', icon: 'plus' },
+      { key:'me', label:'我的', icon: 'user' },
+    ];
+
+    let ui = {
+      tab: 'home',
+      publishMode: 'donate', // donate | request
+      landFilter: 'tracks', // tracks | stations | leaderboard
+      lang: store.i18n.lang || 'zh',
+      searchQuery: '',
+    };
+
+    function setTab(tab){
+      ui.tab = tab;
+      render();
+    }
+
+    // ============ UI Components ============
+    function icon(name, cls='w-5 h-5'){
+      const common = `class="${cls}" fill="none" stroke="currentColor" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"`;
+      switch(name){
+        case 'home': return `<svg ${common}><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10.5L12 3l9 7.5V21a1 1 0 01-1 1h-6v-6H10v6H4a1 1 0 01-1-1v-10.5z"/></svg>`;
+        case 'heart': return `<svg ${common}><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20.84 4.61a5.5 5.5 0 00-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 10-7.78 7.78L12 21.23l8.84-8.84a5.5 5.5 0 000-7.78z"/></svg>`;
+        case 'plus': return `<svg ${common}><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 5v14M5 12h14"/></svg>`;
+        case 'user': return `<svg ${common}><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 21a8 8 0 10-16 0"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 11a4 4 0 100-8 4 4 0 000 8z"/></svg>`;
+        case 'bolt': return `<svg ${common}><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 2L3 14h7l-1 8 10-12h-7l1-8z"/></svg>`;
+        case 'chain': return `<svg ${common}><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 13a5 5 0 010-7l1.5-1.5a5 5 0 017 7L17 13"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M14 11a5 5 0 010 7L12.5 19.5a5 5 0 01-7-7L7 11"/></svg>`;
+        case 'queue': return `<svg ${common}><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 7h10M7 12h7M7 17h10"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 7h0M4 12h0M4 17h0"/></svg>`;
+        case 'face': return `<svg ${common}><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 12c2.5 0 4.5-2 4.5-4.5S14.5 3 12 3 7.5 5 7.5 7.5 9.5 12 12 12z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4.5 21a7.5 7.5 0 0115 0"/></svg>`;
+        case 'pin': return `<svg ${common}><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 21s7-4.35 7-11a7 7 0 10-14 0c0 6.65 7 11 7 11z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 10a2 2 0 100-4 2 2 0 000 4z"/></svg>`;
+        case 'gift': return `<svg ${common}><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M20 12v8a1 1 0 01-1 1H5a1 1 0 01-1-1v-8"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 12h16"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 21V7"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 7h4a2 2 0 000-4c-2 0-4 4-4 4z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 7H8a2 2 0 110-4c2 0 4 4 4 4z"/></svg>`;
+        case 'shield': return `<svg ${common}><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 22s8-4 8-10V6l-8-3-8 3v6c0 6 8 10 8 10z"/></svg>`;
+        case 'cart': return `<svg ${common}><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 3h2l2.5 13H19l2-8H7.2"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 21a1 1 0 100-2 1 1 0 000 2zm10 0a1 1 0 100-2 1 1 0 000 2z"/></svg>`;
+        default: return '';
+      }
+    }
+
+    function pill(text, tone='slate'){
+      const map = {
+        slate: 'bg-slate-100 text-slate-700 border-slate-200',
+        emerald: 'bg-emerald-50 text-emerald-700 border-emerald-200',
+        sky: 'bg-sky-50 text-sky-700 border-sky-200',
+        amber: 'bg-amber-50 text-amber-800 border-amber-200',
+        rose: 'bg-rose-50 text-rose-700 border-rose-200',
+      };
+      return `<span class="text-[11px] px-2 py-0.5 rounded-full border ${map[tone]||map.slate}">${escapeHtml(text)}</span>`;
+    }
+
+    function sectionTitle(title, rightHtml=''){
+      return `
+        <div class="flex items-end justify-between gap-3">
+          <h2 class="text-sm font-semibold text-slate-900">${escapeHtml(title)}</h2>
+          <div class="text-xs text-slate-500">${rightHtml||''}</div>
+        </div>
+      `;
+    }
+
+    function cardShell(inner, cls=''){
+      return `<div class="bg-white border border-slate-200 rounded-2xl shadow-sm ${cls}">${inner}</div>`;
+    }
+
+    // ============ Views ============
+    function viewHome(){
+      const cashNotice = cardShell(`
+        <div class="p-4">
+          <div class="flex items-start gap-3">
+            <div class="w-10 h-10 rounded-xl bg-amber-50 border border-amber-200 flex items-center justify-center text-amber-700">${icon('shield','w-5 h-5')}</div>
+            <div class="flex-1">
+              <div class="flex items-center gap-2">
+                <div class="font-semibold">合规提示</div>
+                ${pill('平台不直接接受现金捐助','amber')}
+              </div>
+              <p class="text-sm text-slate-600 mt-1">现金捐助请进入“捐赠基金管理”端口（原型仅展示）。本平台聚焦<strong>非现金</strong>（实物 / 服务 / 智慧）捐赠信息枢纽与追溯。</p>
+              <div class="mt-3 flex gap-2">
+                <button data-action="openFund" class="tap px-3 py-2 rounded-xl bg-amber-600 text-white text-sm font-medium hover:bg-amber-700">捐赠基金管理入口</button>
+                <button data-action="openLedger" class="tap px-3 py-2 rounded-xl bg-white border border-slate-200 text-sm font-medium hover:bg-slate-50">查看链上公示</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      `);
+
+      const quick = [
+        { k:'donate', t:'我要捐助', s:'实物/服务/智慧', ic:'gift', action:'goPublishDonate' },
+        { k:'request', t:'我要求捐', s:'发布需求信息', ic:'pin', action:'goPublishRequest' },
+        { k:'queue', t:'捐助者排队', s:'公平秩序', ic:'queue', action:'openQueue' },
+        { k:'emergency', t:'突发应急', s:'快速对接', ic:'bolt', action:'openEmergency' },
+        { k:'face', t:'脸部搜索', s:'趣味匹配', ic:'face', action:'openFace' },
+        { k:'ecom', t:'电商捐助', s:'API 对接', ic:'cart', action:'openEcom' },
+      ];
+
+      const quickGrid = cardShell(`
+        <div class="p-4">
+          ${sectionTitle('快捷入口','四大板块：首页 / 爱心福地 / 发布 / 我的')}
+          <div class="mt-3 grid grid-cols-3 gap-2">
+            ${quick.map(q=>`
+              <button data-action="${q.action}" class="tap text-left p-3 rounded-2xl border border-slate-200 bg-slate-50 hover:bg-white">
+                <div class="w-9 h-9 rounded-xl bg-white border border-slate-200 flex items-center justify-center text-slate-700">${icon(q.ic,'w-5 h-5')}</div>
+                <div class="mt-2 text-sm font-semibold">${q.t}</div>
+                <div class="text-xs text-slate-500">${q.s}</div>
+              </button>
+            `).join('')}
+          </div>
+        </div>
+      `);
+
+      const needs = (store.demoNeedCards || []).concat(store.posts.requests || []).slice(0, 6);
+      const needList = cardShell(`
+        <div class="p-4">
+          ${sectionTitle('最新求助信息','强调地点 + 首图 + 类型，便于匹配')}
+          <div class="mt-3 space-y-3">
+            ${needs.length ? needs.map(n=>needCard(n)).join('') : `<div class="text-sm text-slate-500">暂无求助信息，去「发布」板块创建一条。</div>`}
+          </div>
+        </div>
+      `);
+
+      const proof = cardShell(`
+        <div class="p-4">
+          ${sectionTitle('透明追溯示例','行为上链不可篡改（原型模拟）')}
+          <div class="mt-3 rounded-2xl border border-slate-200 overflow-hidden">
+            <div class="p-3 bg-slate-50 flex items-center justify-between">
+              <div class="text-sm font-medium">捐赠流程（示例）</div>
+              <button data-action="seedDemoTx" class="tap text-xs px-2 py-1 rounded-lg bg-slate-900 text-white hover:bg-slate-800">生成示例链上记录</button>
+            </div>
+            <div class="p-3">
+              <ol class="relative border-s border-slate-200 ms-3">
+                ${traceSteps().map(s=>`
+                  <li class="mb-4 ms-4">
+                    <div class="absolute w-3 h-3 bg-emerald-500 rounded-full mt-1.5 -start-1.5 border border-white"></div>
+                    <div class="text-sm font-medium">${escapeHtml(s.title)}</div>
+                    <div class="text-xs text-slate-500">${escapeHtml(s.desc)}</div>
+                  </li>
+                `).join('')}
+              </ol>
+              <div class="mt-3 flex gap-2">
+                <button data-action="openLedger" class="tap px-3 py-2 rounded-xl bg-emerald-600 text-white text-sm font-medium hover:bg-emerald-700">打开链上浏览器</button>
+                <button data-action="openSecurity" class="tap px-3 py-2 rounded-xl bg-white border border-slate-200 text-sm font-medium hover:bg-slate-50">安全与合规说明</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      `);
+
+      const witnessStory = cardShell(`
+        <div class="p-4">
+          ${sectionTitle('见证人故事入口','3-7 天审核，职业化/荣誉化/任务化/奖励化')}
+          <div class="mt-3 flex gap-3">
+            <div class="w-20 h-20 rounded-2xl bg-gradient-to-br from-rose-500 to-amber-400"></div>
+            <div class="flex-1">
+              <div class="text-sm font-semibold">让公益更可信：见证人参与审核与领取协助</div>
+              <div class="text-xs text-slate-600 mt-1">示例：帮助乡邻线上领取物资、核验签收、标注爱心路、完成存证上链。</div>
+              <div class="mt-3 flex gap-2">
+                <button data-action="openWitness" class="tap px-3 py-2 rounded-xl bg-slate-900 text-white text-sm font-medium hover:bg-slate-800">去认证 / 查看状态</button>
+                <button data-action="goLandTracks" class="tap px-3 py-2 rounded-xl bg-white border border-slate-200 text-sm font-medium hover:bg-slate-50">查看爱心足迹</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      `);
+
+      return `
+        <div class="space-y-4 fade-in">
+          ${heroBlock()}
+          ${cashNotice}
+          ${quickGrid}
+          ${needList}
+          ${witnessStory}
+          ${proof}
+        </div>
+      `;
+    }
+
+    function heroBlock(){
+      const u = store.user;
+      return `
+        <div class="rounded-3xl overflow-hidden border border-slate-200 bg-gradient-to-br from-emerald-600 via-sky-600 to-indigo-700 text-white shadow-sm">
+          <div class="p-5">
+            <div class="flex items-start justify-between gap-3">
+              <div>
+                <div class="text-sm opacity-90">你好，${escapeHtml(u.nickname || '来访者')}</div>
+                <div class="text-lg font-semibold mt-1">让捐赠全程可追溯，让每一份善意都有回声</div>
+                <div class="mt-2 text-sm opacity-90">聚焦：捐助方 / 受捐方 / 爱心使者（见证人）</div>
+              </div>
+              <div class="text-right">
+                <div class="text-xs opacity-80">爱心值</div>
+                <div class="text-2xl font-bold">${fmt.num(u.points||0)}</div>
+                <div class="mt-1 text-xs opacity-90">收到的赞：${fmt.num(u.likes||0)}</div>
+              </div>
+            </div>
+            <div class="mt-4 flex flex-wrap gap-2">
+              ${pill(u.verifiedRealName ? '已实名' : '未实名','sky')}
+              ${pill(witnessBadgeText(u.witness?.status),'emerald')}
+              ${pill('Web3 可追溯（模拟）','slate')}
+              ${pill('非现金捐助信息枢纽','slate')}
+            </div>
+          </div>
+          <div class="px-5 pb-5">
+            <div class="bg-white/15 rounded-2xl p-3 border border-white/20">
+              <div class="text-sm font-semibold">今日推荐行动</div>
+              <div class="mt-1 text-sm opacity-90">加入“捐助者排队”维护公平；或在“突发应急”中快速对接所需物资。</div>
+              <div class="mt-3 flex gap-2">
+                <button data-action="openQueue" class="tap px-3 py-2 rounded-xl bg-white text-slate-900 text-sm font-medium hover:bg-slate-50">查看排队</button>
+                <button data-action="openEmergency" class="tap px-3 py-2 rounded-xl bg-slate-900/60 border border-white/20 text-white text-sm font-medium hover:bg-slate-900/80">应急对接</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function witnessBadgeText(status){
+      if(status === 'approved') return '见证人：已通过';
+      if(status === 'pending') return '见证人：审核中';
+      if(status === 'rejected') return '见证人：未通过';
+      return '见证人：未认证';
+    }
+
+    function traceSteps(){
+      return [
+        { title:'发布信息', desc:'受捐方或爱心使者按规范提交：地点、首图、需求/捐助类型等。' },
+        { title:'平台审核/沟通', desc:'后台人员可查看全量信息并线上沟通，确保真实有效。' },
+        { title:'捐助者排队与匹配', desc:'按规则排队与资源匹配，保障秩序与公平。' },
+        { title:'交付与签收', desc:'驿站/快递/现场交付，见证人可协助核验并存证。' },
+        { title:'完成公示与回馈', desc:'流程信息可查询，支持回馈与荣誉证书/奖励。' },
+      ];
+    }
+
+    function urgencyTone(u){
+      if(u==='高') return 'rose';
+      if(u==='中') return 'amber';
+      return 'slate';
+    }
+
+    function needCard(n){
+      const verified = n.verified ? pill('已核验','emerald') : pill('待核验','slate');
+      const u = pill(`紧急度：${n.urgency||'中'}`, urgencyTone(n.urgency||'中'));
+      const t = pill(`类型：${n.type||'物资'}`, 'sky');
+      const loc = pill(n.location || '未知地点', 'slate');
+      const cover = n.cover ? `<img src="${escapeHtml(n.cover)}" alt="cover" class="w-full h-32 object-cover"/>` : `<div class="w-full h-32 bg-slate-100"></div>`;
+      return `
+        <div class="rounded-2xl overflow-hidden border border-slate-200 bg-white hover:shadow-sm">
+          ${cover}
+          <div class="p-3">
+            <div class="flex items-start justify-between gap-2">
+              <div class="font-semibold text-sm leading-snug">${escapeHtml(n.title||'未命名需求')}</div>
+              <button class="tap p-2 -m-2 rounded-xl hover:bg-slate-100" data-action="openNeed" data-id="${escapeHtml(n.id)}" title="查看详情">${icon('chain','w-5 h-5 text-slate-700')}</button>
+            </div>
+            <div class="mt-2 flex flex-wrap gap-1.5">${t}${loc}${u}${verified}</div>
+            <div class="mt-2 text-xs text-slate-600 line-clamp-2">${escapeHtml(n.desc||'')}</div>
+            <div class="mt-3 flex items-center justify-between">
+              <div class="text-xs text-slate-500">${escapeHtml(n.createdBy||'')}${n.createdAt ? ` · ${fmt.dt(n.createdAt)}`:''}</div>
+              <div class="flex gap-2">
+                <button class="tap text-xs px-2.5 py-1.5 rounded-lg bg-emerald-600 text-white hover:bg-emerald-700" data-action="claimNeed" data-id="${escapeHtml(n.id)}">认领</button>
+                <button class="tap text-xs px-2.5 py-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50" data-action="favorite" data-type="request" data-id="${escapeHtml(n.id)}">收藏</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function viewLand(){
+      const lang = ui.lang;
+      const langPill = lang==='zh' ? '中文' : 'EN';
+
+      const top = cardShell(`
+        <div class="p-4">
+          ${sectionTitle('爱心福地','爱心足迹 · 公益驿站 · 榜单')}
+          <div class="mt-3 grid grid-cols-3 gap-2">
+            ${[
+              {k:'tracks', t:'爱心足迹', desc:'标注爱心路', ic:'pin'},
+              {k:'stations', t:'公益驿站', desc:'全国配套', ic:'home'},
+              {k:'leaderboard', t:'公益榜单', desc:'荣誉激励', ic:'gift'},
+            ].map(x=>`
+              <button class="tap p-3 rounded-2xl border ${ui.landFilter===x.k?'border-slate-900 bg-slate-900 text-white':'border-slate-200 bg-white hover:bg-slate-50'}" data-action="setLandFilter" data-filter="${x.k}">
+                <div class="flex items-center gap-2">
+                  <div class="w-8 h-8 rounded-xl ${ui.landFilter===x.k?'bg-white/15 border border-white/20':'bg-slate-50 border border-slate-200'} flex items-center justify-center">${icon(x.ic, ui.landFilter===x.k?'w-4 h-4 text-white':'w-4 h-4 text-slate-700')}</div>
+                  <div class="text-left">
+                    <div class="text-sm font-semibold">${x.t}</div>
+                    <div class="text-xs ${ui.landFilter===x.k?'text-white/80':'text-slate-500'}">${x.desc}</div>
+                  </div>
+                </div>
+              </button>
+            `).join('')}
+          </div>
+
+          <div class="mt-3 flex items-center justify-between">
+            <div class="text-xs text-slate-600">国际化预留：语言切换（演示）</div>
+            <button class="tap text-xs px-2.5 py-1.5 rounded-xl border border-slate-200 bg-white hover:bg-slate-50" data-action="toggleLang">当前：${langPill}</button>
+          </div>
+        </div>
+      `);
+
+      let body = '';
+      if(ui.landFilter==='tracks') body = landTracks();
+      else if(ui.landFilter==='stations') body = landStations();
+      else body = landLeaderboard();
+
+      return `<div class="space-y-4 fade-in">${top}${body}</div>`;
+    }
+
+    function landTracks(){
+      const tracks = store.loveTracks || [];
+      return cardShell(`
+        <div class="p-4">
+          ${sectionTitle('爱心足迹','展示“见证-协助-存证”')}
+          <div class="mt-3 space-y-3">
+            ${tracks.map(t=>`
+              <div class="p-3 rounded-2xl border border-slate-200 bg-white">
+                <div class="flex items-start justify-between gap-3">
+                  <div>
+                    <div class="text-sm font-semibold">${escapeHtml(t.title)}</div>
+                    <div class="text-xs text-slate-500 mt-0.5">${escapeHtml(t.by)} · ${escapeHtml(t.location)} · ${fmt.dt(t.time)}</div>
+                  </div>
+                  <button class="tap text-xs px-2.5 py-1.5 rounded-xl border border-slate-200 hover:bg-slate-50" data-action="openTrack" data-id="${escapeHtml(t.id)}">详情</button>
+                </div>
+                <div class="mt-2 text-sm text-slate-600">${escapeHtml(t.note)}</div>
+              </div>
+            `).join('')}
+          </div>
+          <div class="mt-3 flex gap-2">
+            <button class="tap px-3 py-2 rounded-xl bg-slate-900 text-white text-sm font-medium hover:bg-slate-800" data-action="openWitness">成为见证人</button>
+            <button class="tap px-3 py-2 rounded-xl bg-white border border-slate-200 text-sm font-medium hover:bg-slate-50" data-action="openRewards">查看酬赏系统</button>
+          </div>
+        </div>
+      `);
+    }
+
+    function landStations(){
+      const stations = store.stations || [];
+      return cardShell(`
+        <div class="p-4">
+          ${sectionTitle('公益驿站（配套）','房车办公形态 · 城市化运作（演示）')}
+          <div class="mt-3 space-y-3">
+            ${stations.map(s=>`
+              <div class="p-3 rounded-2xl border border-slate-200 bg-white">
+                <div class="flex items-center justify-between gap-3">
+                  <div>
+                    <div class="text-sm font-semibold">${escapeHtml(s.name)}</div>
+                    <div class="text-xs text-slate-500">城市：${escapeHtml(s.city)} · 状态：${escapeHtml(s.status)} · 更新：${fmt.dt(s.updatedAt)}</div>
+                  </div>
+                  <button class="tap text-xs px-2.5 py-1.5 rounded-xl border border-slate-200 hover:bg-slate-50" data-action="openStation" data-id="${escapeHtml(s.id)}">对接</button>
+                </div>
+                <div class="mt-2 flex flex-wrap gap-1.5">${(s.services||[]).map(x=>pill(x,'sky')).join('')}</div>
+              </div>
+            `).join('')}
+          </div>
+          <div class="mt-3 text-xs text-slate-500">说明：驿站支持物资中转、应急对接、志愿者集结、企业项目协作等。</div>
+        </div>
+      `);
+    }
+
+    function landLeaderboard(){
+      const users = [
+        { name:'爱心使者·小林', points: 980, badges:['年度见证人','助学行动'] },
+        { name:'企业·某某科技', points: 860, badges:['企业公益伙伴','双向宣传'] },
+        { name:'个人·张同学', points: 540, badges:['公益行动派'] },
+        { name:'爱心使者·阿杰', points: 520, badges:['应急先锋'] },
+        { name:'个人·李阿姨', points: 390, badges:['社区守望者'] },
+      ];
+      return cardShell(`
+        <div class="p-4">
+          ${sectionTitle('公益榜单（示例）','荣誉化 + 任务化 + 奖励化')}
+          <div class="mt-3 space-y-2">
+            ${users.map((u,i)=>`
+              <div class="p-3 rounded-2xl border border-slate-200 bg-white flex items-start gap-3">
+                <div class="w-9 h-9 rounded-xl ${i===0?'bg-amber-100 border border-amber-200':'bg-slate-100 border border-slate-200'} flex items-center justify-center text-sm font-bold">${i+1}</div>
+                <div class="flex-1">
+                  <div class="flex items-center justify-between gap-2">
+                    <div class="text-sm font-semibold">${escapeHtml(u.name)}</div>
+                    <div class="text-xs text-slate-500">爱心值：${fmt.num(u.points)}</div>
+                  </div>
+                  <div class="mt-1 flex flex-wrap gap-1.5">${u.badges.map(b=>pill(b, i===0?'amber':'slate')).join('')}</div>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+          <div class="mt-3 flex gap-2">
+            <button class="tap px-3 py-2 rounded-xl bg-emerald-600 text-white text-sm font-medium hover:bg-emerald-700" data-action="openRewards">查看我的酬赏</button>
+            <button class="tap px-3 py-2 rounded-xl bg-white border border-slate-200 text-sm font-medium hover:bg-slate-50" data-action="openBadges">我的勋章</button>
+          </div>
+        </div>
+      `);
+    }
+
+    function viewPublish(){
+      const mode = ui.publishMode;
+      const tabs = [
+        {k:'donate', t:'我要捐助（非现金）', desc:'实物 / 服务 / 智慧'},
+        {k:'request', t:'我要求捐', desc:'发布求助信息'},
+      ];
+
+      const header = cardShell(`
+        <div class="p-4">
+          ${sectionTitle('发布','规范信息，便于精准匹配')}
+          <div class="mt-3 grid grid-cols-2 gap-2">
+            ${tabs.map(t=>`
+              <button class="tap p-3 rounded-2xl border ${mode===t.k?'border-emerald-700 bg-emerald-600 text-white':'border-slate-200 bg-white hover:bg-slate-50'}" data-action="setPublishMode" data-mode="${t.k}">
+                <div class="text-sm font-semibold">${t.t}</div>
+                <div class="text-xs ${mode===t.k?'text-white/80':'text-slate-500'}">${t.desc}</div>
+              </button>
+            `).join('')}
+          </div>
+          <div class="mt-3 text-xs text-slate-500">提示：请尽量填写地点、首图、清晰描述与可验证信息；涉及服务类请注明可提供时间与范围。</div>
+        </div>
+      `);
+
+      const form = mode==='donate' ? formDonate() : formRequest();
+
+      const myPosts = cardShell(`
+        <div class="p-4">
+          ${sectionTitle('我的发布（演示）',`捐助 ${store.posts.donations.length} · 求助 ${store.posts.requests.length}`)}
+          <div class="mt-3 space-y-2">
+            ${renderMyPostsPreview()}
+          </div>
+        </div>
+      `);
+
+      return `<div class="space-y-4 fade-in">${header}${form}${myPosts}</div>`;
+    }
+
+    function renderMyPostsPreview(){
+      const items = [];
+      for(const d of (store.posts.donations||[]).slice(0,3)) items.push({ kind:'donation', ...d});
+      for(const r of (store.posts.requests||[]).slice(0,3)) items.push({ kind:'request', ...r});
+      items.sort((a,b)=> (b.createdAt||0) - (a.createdAt||0));
+      if(!items.length){
+        return `<div class="text-sm text-slate-500">暂无发布记录。</div>`;
+      }
+      return items.slice(0,5).map(x=>`
+        <div class="p-3 rounded-2xl border border-slate-200 bg-white flex items-start justify-between gap-3">
+          <div>
+            <div class="text-sm font-semibold">${escapeHtml(x.title||'(未命名)')}</div>
+            <div class="mt-1 text-xs text-slate-500">${x.kind==='donation'?'捐助':'求助'} · ${escapeHtml(x.type||'')} · ${escapeHtml(x.location||'')} · ${fmt.dt(x.createdAt)}</div>
+          </div>
+          <button class="tap text-xs px-2.5 py-1.5 rounded-xl border border-slate-200 hover:bg-slate-50" data-action="openPost" data-kind="${x.kind}" data-id="${escapeHtml(x.id)}">查看</button>
+        </div>
+      `).join('');
+    }
+
+    function formDonate(){
+      const addressOptions = (store.addresses||[]).map(a=>`<option value="${escapeHtml(a.id)}">${escapeHtml(a.label)}｜${escapeHtml(a.detail)}</option>`).join('');
+      return cardShell(`
+        <div class="p-4">
+          ${sectionTitle('提交捐助信息','不含现金捐助')}
+          <form id="donateForm" class="mt-3 space-y-3">
+            <div class="grid grid-cols-2 gap-2">
+              <label class="block">
+                <div class="text-xs text-slate-600 mb-1">捐助类型</div>
+                <select name="type" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm">
+                  <option>物资</option>
+                  <option>服务</option>
+                  <option>智慧</option>
+                </select>
+              </label>
+              <label class="block">
+                <div class="text-xs text-slate-600 mb-1">是否参与排队</div>
+                <select name="queue" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm">
+                  <option value="yes">是（推荐）</option>
+                  <option value="no">否（直接对接）</option>
+                </select>
+              </label>
+            </div>
+
+            <label class="block">
+              <div class="text-xs text-slate-600 mb-1">标题</div>
+              <input name="title" required placeholder="例如：捐助二手学习机（可正常使用）" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" />
+            </label>
+
+            <label class="block">
+              <div class="text-xs text-slate-600 mb-1">地点（用于匹配）</div>
+              <input name="location" required placeholder="省/市/区 或 受助地" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" />
+            </label>
+
+            <label class="block">
+              <div class="text-xs text-slate-600 mb-1">首图（可选：图片 URL）</div>
+              <input name="cover" placeholder="https://..." class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" />
+            </label>
+
+            <label class="block">
+              <div class="text-xs text-slate-600 mb-1">详细说明</div>
+              <textarea name="desc" rows="4" required placeholder="数量/规格/可提供时间/服务范围/可验收方式..." class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"></textarea>
+            </label>
+
+            <div class="grid grid-cols-2 gap-2">
+              <label class="block">
+                <div class="text-xs text-slate-600 mb-1">交付方式</div>
+                <select name="deliver" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm">
+                  <option>快递</option>
+                  <option>驿站中转</option>
+                  <option>线下当面</option>
+                  <option>线上服务</option>
+                </select>
+              </label>
+              <label class="block">
+                <div class="text-xs text-slate-600 mb-1">默认地址（可选）</div>
+                <select name="addressId" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm">
+                  <option value="">不使用</option>
+                  ${addressOptions}
+                </select>
+              </label>
+            </div>
+
+            <div class="flex items-start gap-2">
+              <input id="donateAgree" type="checkbox" required class="mt-1" />
+              <label for="donateAgree" class="text-xs text-slate-600">我确认本发布为<strong>非现金</strong>捐助信息，内容真实有效，愿意配合平台审核与沟通，并接受信息公示与链上存证（原型模拟）。</label>
+            </div>
+
+            <div class="flex gap-2">
+              <button class="tap flex-1 px-3 py-2.5 rounded-xl bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700" type="submit">发布捐助</button>
+              <button class="tap px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-sm font-semibold hover:bg-slate-50" type="button" data-action="openQueue">查看排队</button>
+            </div>
+          </form>
+        </div>
+      `);
+    }
+
+    function formRequest(){
+      return cardShell(`
+        <div class="p-4">
+          ${sectionTitle('提交求助信息','可由受捐人自发或爱心使者协助审核发布')}
+          <form id="requestForm" class="mt-3 space-y-3">
+            <div class="grid grid-cols-2 gap-2">
+              <label class="block">
+                <div class="text-xs text-slate-600 mb-1">需求类型</div>
+                <select name="type" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm">
+                  <option>物资</option>
+                  <option>服务</option>
+                  <option>智慧</option>
+                </select>
+              </label>
+              <label class="block">
+                <div class="text-xs text-slate-600 mb-1">紧急度</div>
+                <select name="urgency" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm">
+                  <option>高</option>
+                  <option selected>中</option>
+                  <option>低</option>
+                </select>
+              </label>
+            </div>
+
+            <label class="block">
+              <div class="text-xs text-slate-600 mb-1">地点（必填）</div>
+              <input name="location" required placeholder="省/市/区，尽量详细" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" />
+            </label>
+
+            <label class="block">
+              <div class="text-xs text-slate-600 mb-1">首图（建议填写，便于匹配）</div>
+              <input name="cover" placeholder="图片 URL（可选）" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" />
+            </label>
+
+            <label class="block">
+              <div class="text-xs text-slate-600 mb-1">标题</div>
+              <input name="title" required placeholder="例如：需要一次医疗咨询服务" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" />
+            </label>
+
+            <label class="block">
+              <div class="text-xs text-slate-600 mb-1">需求描述（越清晰越容易匹配）</div>
+              <textarea name="desc" rows="5" required placeholder="现状/所需物资或服务/数量或范围/可验收方式/联系方式（可选）..." class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"></textarea>
+            </label>
+
+            <label class="block">
+              <div class="text-xs text-slate-600 mb-1">是否希望回馈（可选）</div>
+              <select name="allowFeedback" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm">
+                <option value="no">不回馈</option>
+                <option value="yes">可回馈（如土特产回赠/低价惊喜回馈）</option>
+              </select>
+            </label>
+
+            <div class="p-3 rounded-2xl border border-slate-200 bg-slate-50">
+              <div class="text-sm font-semibold">见证人协助（可选）</div>
+              <div class="mt-1 text-xs text-slate-600">可申请爱心使者协助：信息核验、代发布、领取协助等。审核时间约 3-7 天（原型演示）。</div>
+              <div class="mt-3 flex items-center gap-2">
+                <button type="button" class="tap px-3 py-2 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="openWitness">成为/查看见证人</button>
+                <button type="button" class="tap px-3 py-2 rounded-xl bg-white border border-slate-200 text-sm font-semibold hover:bg-slate-50" data-action="simulateNeedVerify">模拟“见证人核验通过”</button>
+              </div>
+            </div>
+
+            <div class="flex items-start gap-2">
+              <input id="reqAgree" type="checkbox" required class="mt-1" />
+              <label for="reqAgree" class="text-xs text-slate-600">我确认需求信息真实有效，同意平台审核与必要的沟通，并接受流程公示与链上存证（原型模拟）。</label>
+            </div>
+
+            <div class="flex gap-2">
+              <button class="tap flex-1 px-3 py-2.5 rounded-xl bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700" type="submit">发布求助</button>
+              <button class="tap px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-sm font-semibold hover:bg-slate-50" type="button" data-action="openEmergency">应急板块</button>
+            </div>
+          </form>
+        </div>
+      `);
+    }
+
+    function viewMe(){
+      const u = store.user;
+      const witness = u.witness?.status || 'none';
+      const real = u.verifiedRealName;
+
+      const profile = cardShell(`
+        <div class="p-4">
+          <div class="flex items-start gap-3">
+            <div class="w-14 h-14 rounded-2xl bg-gradient-to-br from-slate-900 to-slate-600 text-white flex items-center justify-center text-lg font-bold">${escapeHtml((u.nickname||'来').slice(0,1))}</div>
+            <div class="flex-1">
+              <div class="flex items-center justify-between gap-2">
+                <div>
+                  <div class="text-base font-semibold">${escapeHtml(u.nickname||'来访者')}</div>
+                  <div class="text-xs text-slate-500 mt-0.5">${escapeHtml(u.signature||'')}</div>
+                </div>
+                <button data-action="editProfile" class="tap text-xs px-2.5 py-1.5 rounded-xl border border-slate-200 hover:bg-slate-50">编辑</button>
+              </div>
+              <div class="mt-2 flex flex-wrap gap-1.5">
+                ${pill(real ? '实名认证：已完成' : '实名认证：未完成', real?'emerald':'amber')}
+                ${pill(witnessBadgeText(witness), witness==='approved'?'emerald':(witness==='pending'?'amber':'slate'))}
+                ${pill(`爱心值：${fmt.num(u.points||0)}`,'sky')}
+                ${pill(`收到的赞：${fmt.num(u.likes||0)}`,'slate')}
+              </div>
+            </div>
+          </div>
+        </div>
+      `);
+
+      const progress = cardShell(`
+        <div class="p-4">
+          ${sectionTitle('我的爱心进展','进展/到期提醒/全流程可查（演示）')}
+          <div class="mt-3 grid grid-cols-3 gap-2">
+            ${statCard('我的发布', (store.posts.donations.length + store.posts.requests.length), 'openMyPosts')}
+            ${statCard('认领记录', (store.claims||[]).length, 'openClaims')}
+            ${statCard('我的收藏', (store.favorites||[]).length, 'openFavorites')}
+          </div>
+          <div class="mt-3 flex gap-2">
+            <button data-action="openLedger" class="tap px-3 py-2 rounded-xl bg-white border border-slate-200 text-sm font-semibold hover:bg-slate-50">链上追溯</button>
+            <button data-action="openRewards" class="tap px-3 py-2 rounded-xl bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700">酬赏系统</button>
+          </div>
+        </div>
+      `);
+
+      const tools = cardShell(`
+        <div class="p-4">
+          ${sectionTitle('常用功能','通知、地址、勋章、反馈与设置')}
+          <div class="mt-3 space-y-2">
+            ${menuItem('我的消息', '完善通知系统，直达粉丝（演示）', 'openInbox')}
+            ${menuItem('我的地址', '历史地址便捷输入', 'openAddresses')}
+            ${menuItem('成为见证人', '提交量化文件，后台审核 3-7 天', 'openWitness')}
+            ${menuItem('我的勋章', '荣誉化激励', 'openBadges')}
+            ${menuItem('反馈建议', '收集需求与问题', 'openFeedback')}
+            ${menuItem('设置', '隐私/安全/数据同步（演示）', 'openSettings')}
+            ${menuItem('关于阿福', '项目愿景与路线图', 'openAbout')}
+            ${menuItem('退出登录', '清空本地演示数据', 'logout', true)}
+          </div>
+        </div>
+      `);
+
+      const enterprise = cardShell(`
+        <div class="p-4">
+          ${sectionTitle('企业/机构端口（演示）','2.0-3.0 迭代：自建项目/服务类供给/双向宣传')}
+          <div class="mt-3 p-3 rounded-2xl border border-slate-200 bg-slate-50">
+            <div class="text-sm font-semibold">企业后台能力（示例）</div>
+            <ul class="mt-2 text-sm text-slate-600 list-disc pl-5 space-y-1">
+              <li>设立自有公益项目并通过平台实施</li>
+              <li>提供慈善物资与平台运营经费（非现金信息公示）</li>
+              <li>服务类供给：医疗/法务/支教等（计划 3.0）</li>
+              <li>项目全流程链上追溯、公示与数据报表</li>
+            </ul>
+            <div class="mt-3 flex gap-2">
+              <button data-action="openEnterprise" class="tap px-3 py-2 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800">进入企业端（原型）</button>
+              <button data-action="openEcom" class="tap px-3 py-2 rounded-xl bg-white border border-slate-200 text-sm font-semibold hover:bg-slate-50">电商 API 对接</button>
+            </div>
+          </div>
+        </div>
+      `);
+
+      return `<div class="space-y-4 fade-in">${profile}${progress}${tools}${enterprise}</div>`;
+    }
+
+    function statCard(title, value, action){
+      return `
+        <button class="tap p-3 rounded-2xl border border-slate-200 bg-white text-left hover:bg-slate-50" data-action="${action}">
+          <div class="text-xs text-slate-500">${escapeHtml(title)}</div>
+          <div class="mt-1 text-lg font-bold">${fmt.num(value||0)}</div>
+        </button>
+      `;
+    }
+
+    function menuItem(title, desc, action, danger=false){
+      return `
+        <button class="tap w-full p-3 rounded-2xl border ${danger?'border-rose-200 bg-rose-50 hover:bg-rose-100':'border-slate-200 bg-white hover:bg-slate-50'} text-left" data-action="${action}">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <div class="text-sm font-semibold ${danger?'text-rose-700':'text-slate-900'}">${escapeHtml(title)}</div>
+              <div class="text-xs ${danger?'text-rose-700/80':'text-slate-500'} mt-0.5">${escapeHtml(desc)}</div>
+            </div>
+            <div class="text-slate-400">›</div>
+          </div>
+        </button>
+      `;
+    }
+
+    // ============ Modal Framework ============
+    function openModal({title, bodyHtml, footerHtml='', wide=false}){
+      const root = $('#modalRoot');
+      root.classList.remove('hidden');
+      root.innerHTML = `
+        <div class="absolute inset-0 bg-slate-900/40" data-action="closeModal"></div>
+        <div class="absolute inset-x-0 bottom-0 max-h-[92dvh] overflow-hidden">
+          <div class="${wide?'max-w-2xl':'max-w-md'} mx-auto">
+            <div class="bg-white rounded-t-3xl border border-slate-200 shadow-xl overflow-hidden fade-in">
+              <div class="px-4 py-3 border-b border-slate-200 flex items-center gap-2">
+                <div class="flex-1">
+                  <div class="text-sm font-semibold">${escapeHtml(title||'')}</div>
+                </div>
+                <button class="tap p-2 rounded-xl hover:bg-slate-100" data-action="closeModal" title="关闭">
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" class="w-5 h-5">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                  </svg>
+                </button>
+              </div>
+              <div class="p-4 overflow-y-auto no-scrollbar" style="max-height: calc(92dvh - 56px - 64px);">
+                ${bodyHtml}
+              </div>
+              <div class="p-4 border-t border-slate-200 bg-slate-50">
+                ${footerHtml || '<button class="tap w-full px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">完成</button>'}
+              </div>
+            </div>
+          </div>
+        </div>
+      `;
+    }
+
+    function closeModal(){
+      const root = $('#modalRoot');
+      root.classList.add('hidden');
+      root.innerHTML = '';
+    }
+
+    // ============ Modal Content ============
+    function openLedgerModal(){
+      const items = store.ledger || [];
+      const body = `
+        <div class="p-3 rounded-2xl border border-slate-200 bg-slate-50">
+          <div class="text-sm font-semibold">链上浏览器（原型模拟）</div>
+          <div class="text-xs text-slate-600 mt-1">说明：此处用本地账本模拟“上链不可篡改”。真实系统可对接联盟链/公链，并按隐私策略分级公开。</div>
+        </div>
+        <div class="mt-3 flex items-center justify-between">
+          <div class="text-sm font-semibold">记录数：${fmt.num(items.length)}</div>
+          <button class="tap text-xs px-2.5 py-1.5 rounded-xl border border-slate-200 hover:bg-slate-50" data-action="exportLedger">导出 JSON</button>
+        </div>
+        <div class="mt-3 space-y-2">
+          ${items.length ? items.slice(0,50).map(tx=>`
+            <div class="p-3 rounded-2xl border border-slate-200 bg-white">
+              <div class="flex items-start justify-between gap-3">
+                <div>
+                  <div class="text-sm font-semibold">${escapeHtml(tx.action)}</div>
+                  <div class="text-xs text-slate-500 mt-0.5">${fmt.dt(tx.time)} · ${pill(tx.visibility==='public'?'公开':'受限', tx.visibility==='public'?'emerald':'slate')}</div>
+                </div>
+                <button class="tap text-xs px-2.5 py-1.5 rounded-xl border border-slate-200 hover:bg-slate-50" data-action="openTx" data-id="${escapeHtml(tx.id)}">详情</button>
+              </div>
+              <div class="mt-2 text-xs font-mono text-slate-600 break-all">hash: ${escapeHtml(tx.hash)}</div>
+            </div>
+          `).join('') : `<div class="text-sm text-slate-500">暂无记录。你可以在首页点击“生成示例链上记录”，或发布/认领/排队等动作会自动写入。</div>`}
+        </div>
+      `;
+      openModal({
+        title: '链上追溯',
+        bodyHtml: body,
+        footerHtml: `
+          <div class="grid grid-cols-2 gap-2">
+            <button class="tap px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-sm font-semibold hover:bg-slate-50" data-action="seedDemoTx">生成示例</button>
+            <button class="tap px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">关闭</button>
+          </div>
+        `
+      });
+    }
+
+    function openTxModal(id){
+      const tx = (store.ledger||[]).find(x=>x.id===id);
+      if(!tx){
+        openModal({title:'记录不存在', bodyHtml:`<div class="text-sm text-slate-600">未找到该链上记录。</div>`});
+        return;
+      }
+      openModal({
+        title: `链上记录详情`,
+        bodyHtml: `
+          <div class="space-y-3">
+            ${kv('Action', tx.action)}
+            ${kv('Time', fmt.dt(tx.time))}
+            ${kv('Visibility', tx.visibility)}
+            ${kv('Hash', `<span class=\"font-mono break-all\">${escapeHtml(tx.hash)}</span>`)}
+            <div class="p-3 rounded-2xl border border-slate-200 bg-white">
+              <div class="text-xs text-slate-500">Payload</div>
+              <pre class="mt-2 text-xs bg-slate-50 p-3 rounded-xl border border-slate-200 overflow-auto">${escapeHtml(JSON.stringify(tx.payload, null, 2))}</pre>
+            </div>
+          </div>
+        `,
+        footerHtml: `
+          <div class="grid grid-cols-2 gap-2">
+            <button class="tap px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-sm font-semibold hover:bg-slate-50" data-action="copyText" data-text="${escapeHtml(tx.hash)}">复制 Hash</button>
+            <button class="tap px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">关闭</button>
+          </div>
+        `
+      });
+    }
+
+    function kv(k,v){
+      return `
+        <div class="p-3 rounded-2xl border border-slate-200 bg-white">
+          <div class="text-xs text-slate-500">${escapeHtml(k)}</div>
+          <div class="mt-1 text-sm">${v}</div>
+        </div>
+      `;
+    }
+
+    function openQueueModal(){
+      const entries = store.queue.entries || [];
+      const myId = store.user.id;
+      const myEntry = entries.find(e=>e.userId===myId);
+      const sorted = entries.slice().sort((a,b)=>a.createdAt-b.createdAt);
+      const pos = myEntry ? (sorted.findIndex(x=>x.id===myEntry.id)+1) : null;
+
+      const body = `
+        <div class="p-3 rounded-2xl border border-slate-200 bg-slate-50">
+          <div class="text-sm font-semibold">捐助者排队（关键功能原型）</div>
+          <div class="text-xs text-slate-600 mt-1">目标：保障捐助秩序与公平。真实实现可采用队列服务 + 防刷 + 链上时间戳 + 规则引擎。</div>
+        </div>
+
+        <div class="mt-3 grid grid-cols-3 gap-2">
+          <div class="p-3 rounded-2xl border border-slate-200 bg-white">
+            <div class="text-xs text-slate-500">队列人数</div>
+            <div class="mt-1 text-lg font-bold">${fmt.num(sorted.length)}</div>
+          </div>
+          <div class="p-3 rounded-2xl border border-slate-200 bg-white">
+            <div class="text-xs text-slate-500">我的位置</div>
+            <div class="mt-1 text-lg font-bold">${pos ? fmt.num(pos) : '-'}</div>
+          </div>
+          <div class="p-3 rounded-2xl border border-slate-200 bg-white">
+            <div class="text-xs text-slate-500">规则</div>
+            <div class="mt-1 text-sm font-semibold">先到先服务</div>
+          </div>
+        </div>
+
+        <div class="mt-3 space-y-2">
+          ${sorted.slice(0,12).map((e,i)=>`
+            <div class="p-3 rounded-2xl border border-slate-200 bg-white flex items-center justify-between gap-3">
+              <div>
+                <div class="text-sm font-semibold">#${i+1} · ${escapeHtml(e.nickname||'匿名捐助者')}</div>
+                <div class="text-xs text-slate-500">加入时间：${fmt.dt(e.createdAt)} · 类型：${escapeHtml(e.type||'综合')}</div>
+              </div>
+              ${e.userId===myId ? `<span class="text-xs px-2 py-1 rounded-lg bg-emerald-50 text-emerald-700 border border-emerald-200">我</span>` : ``}
+            </div>
+          `).join('')}
+          ${sorted.length>12 ? `<div class="text-xs text-slate-500">仅展示前 12 位（演示）。</div>`:''}
+        </div>
+      `;
+
+      const footer = myEntry ? `
+        <div class="grid grid-cols-2 gap-2">
+          <button class="tap px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-sm font-semibold hover:bg-slate-50" data-action="leaveQueue">退出排队</button>
+          <button class="tap px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">关闭</button>
+        </div>
+      ` : `
+        <div class="grid grid-cols-2 gap-2">
+          <button class="tap px-3 py-2.5 rounded-xl bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700" data-action="joinQueue">加入排队</button>
+          <button class="tap px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">关闭</button>
+        </div>
+      `;
+
+      openModal({ title: '捐助者排队', bodyHtml: body, footerHtml: footer });
+    }
+
+    function openEmergencyModal(){
+      const list = store.emergency || [];
+      const tone = (lvl)=> lvl==='红色' ? 'rose' : (lvl==='橙色'?'amber':'slate');
+      const body = `
+        <div class="p-3 rounded-2xl border border-slate-200 bg-slate-50">
+          <div class="text-sm font-semibold">突发应急板块</div>
+          <div class="text-xs text-slate-600 mt-1">解决资源浪费与匹配度不高问题：快速对接应急需求与捐赠资源（原型演示）。</div>
+        </div>
+        <div class="mt-3 space-y-3">
+          ${list.map(e=>`
+            <div class="p-3 rounded-2xl border border-slate-200 bg-white">
+              <div class="flex items-start justify-between gap-3">
+                <div>
+                  <div class="text-sm font-semibold">${escapeHtml(e.title)}</div>
+                  <div class="text-xs text-slate-500 mt-0.5">${escapeHtml(e.location)} · 更新：${fmt.dt(e.updatedAt)} · 影响人数约 ${fmt.num(e.people||0)}</div>
+                </div>
+                <div class="flex flex-col items-end gap-2">
+                  ${pill(`等级：${e.level}`, tone(e.level))}
+                  <button class="tap text-xs px-2.5 py-1.5 rounded-xl bg-emerald-600 text-white hover:bg-emerald-700" data-action="pledgeEmergency" data-id="${escapeHtml(e.id)}">我要对接</button>
+                </div>
+              </div>
+              <div class="mt-2 flex flex-wrap gap-1.5">${(e.needed||[]).map(x=>pill(x,'sky')).join('')}</div>
+            </div>
+          `).join('')}
+        </div>
+      `;
+
+      openModal({
+        title: '突发应急',
+        bodyHtml: body,
+        footerHtml: `
+          <div class="grid grid-cols-2 gap-2">
+            <button class="tap px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-sm font-semibold hover:bg-slate-50" data-action="openEcom">电商快速捐</button>
+            <button class="tap px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">关闭</button>
+          </div>
+        `
+      });
+    }
+
+    function openEmergencyPledgeModal(eid){
+      const e = (store.emergency||[]).find(x=>x.id===eid);
+      if(!e){
+        openModal({title:'应急事件不存在', bodyHtml:`<div class="text-sm text-slate-600">未找到该应急事件。</div>`});
+        return;
+      }
+      openModal({
+        title: '应急对接：提交捐助/服务',
+        bodyHtml: `
+          <div class="p-3 rounded-2xl border border-slate-200 bg-slate-50">
+            <div class="text-sm font-semibold">${escapeHtml(e.title)}</div>
+            <div class="text-xs text-slate-600 mt-0.5">地点：${escapeHtml(e.location)} · 等级：${escapeHtml(e.level)}</div>
+            <div class="mt-2 flex flex-wrap gap-1.5">${(e.needed||[]).map(x=>pill(x,'sky')).join('')}</div>
+          </div>
+          <form id="emergencyPledgeForm" class="mt-3 space-y-3">
+            <input type="hidden" name="eid" value="${escapeHtml(e.id)}" />
+            <div class="grid grid-cols-2 gap-2">
+              <label class="block">
+                <div class="text-xs text-slate-600 mb-1">对接类型</div>
+                <select name="type" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm">
+                  <option>物资</option>
+                  <option>服务</option>
+                  <option>智慧</option>
+                </select>
+              </label>
+              <label class="block">
+                <div class="text-xs text-slate-600 mb-1">数量/规模</div>
+                <input name="amount" required placeholder="例如：200 份" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" />
+              </label>
+            </div>
+            <label class="block">
+              <div class="text-xs text-slate-600 mb-1">说明</div>
+              <textarea name="desc" rows="4" required placeholder="物资清单/服务范围/预计到达时间/验收方式..." class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"></textarea>
+            </label>
+            <div class="flex items-start gap-2">
+              <input id="epAgree" type="checkbox" required class="mt-1" />
+              <label for="epAgree" class="text-xs text-slate-600">我确认对接信息真实有效，并同意平台匹配规则与必要的沟通。</label>
+            </div>
+            <button class="tap w-full px-3 py-2.5 rounded-xl bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700" type="submit">提交对接</button>
+          </form>
+        `,
+        footerHtml: `
+          <button class="tap w-full px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">关闭</button>
+        `
+      });
+    }
+
+    function openFaceSearchModal(){
+      const body = `
+        <div class="p-3 rounded-2xl border border-slate-200 bg-slate-50">
+          <div class="text-sm font-semibold">脸部搜索（趣味性原型）</div>
+          <div class="text-xs text-slate-600 mt-1">演示思路：上传一张照片，做“相似度匹配”引导用户捐助。真实系统应严格合规、征得授权、做好隐私保护与安全审计。</div>
+        </div>
+        <form id="faceForm" class="mt-3 space-y-3">
+          <label class="block">
+            <div class="text-xs text-slate-600 mb-1">上传图片（本地，不会上传服务器）</div>
+            <input name="file" type="file" accept="image/*" class="w-full text-sm" />
+          </label>
+          <label class="block">
+            <div class="text-xs text-slate-600 mb-1">或输入任意关键词（用于演示）</div>
+            <input name="seed" placeholder="例如：微笑、眼镜、孩子..." class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" />
+          </label>
+          <button class="tap w-full px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" type="submit">开始匹配</button>
+        </form>
+        <div id="faceResult" class="mt-3"></div>
+      `;
+      openModal({ title:'脸部搜索', bodyHtml: body, footerHtml: `<button class="tap w-full px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-sm font-semibold hover:bg-slate-50" data-action="closeModal">关闭</button>` });
+    }
+
+    function renderFaceResults(seed){
+      const list = store.beneficiaries || [];
+      const base = demoHash(seed);
+      // Deterministic pseudo-score based on combined hash
+      const scored = list.map(b=>{
+        const h = demoHash(base + b.id + b.name);
+        const n = parseInt(h.slice(0,8),16) / 0xffffffff;
+        const score = Math.round((0.55 + n*0.45) * 100); // 55-100
+        return { ...b, score };
+      }).sort((a,b)=>b.score-a.score).slice(0,3);
+
+      return `
+        <div class="p-3 rounded-2xl border border-slate-200 bg-white">
+          <div class="text-sm font-semibold">相似匹配 Top 3（演示）</div>
+          <div class="text-xs text-slate-500 mt-1">seed：<span class="font-mono">${escapeHtml(String(seed).slice(0,60))}</span></div>
+          <div class="mt-3 space-y-3">
+            ${scored.map(x=>`
+              <div class="flex gap-3">
+                <img src="${escapeHtml(x.avatar)}" alt="${escapeHtml(x.name)}" class="w-16 h-16 rounded-2xl object-cover border border-slate-200"/>
+                <div class="flex-1">
+                  <div class="flex items-start justify-between gap-2">
+                    <div>
+                      <div class="text-sm font-semibold">${escapeHtml(x.name)} · ${x.age} 岁</div>
+                      <div class="text-xs text-slate-500">${escapeHtml(x.location)}</div>
+                    </div>
+                    ${pill(`相似度 ${x.score}%`, x.score>=85?'emerald':'amber')}
+                  </div>
+                  <div class="mt-1 flex flex-wrap gap-1.5">${(x.tags||[]).map(t=>pill(t,'sky')).join('')}</div>
+                  <div class="mt-2 flex gap-2">
+                    <button class="tap text-xs px-2.5 py-1.5 rounded-xl bg-emerald-600 text-white hover:bg-emerald-700" data-action="goPublishDonate">去捐助</button>
+                    <button class="tap text-xs px-2.5 py-1.5 rounded-xl border border-slate-200 hover:bg-slate-50" data-action="openNeedByFace" data-id="${escapeHtml(x.id)}">查看可匹配需求</button>
+                  </div>
+                </div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      `;
+    }
+
+    function openInboxModal(){
+      const list = store.notifications || [];
+      const unread = list.filter(n=>!n.read).length;
+      const body = `
+        <div class="flex items-center justify-between">
+          <div class="text-sm font-semibold">消息通知</div>
+          <div class="text-xs text-slate-500">未读：${fmt.num(unread)}</div>
+        </div>
+        <div class="mt-3 space-y-2">
+          ${list.length ? list.map(n=>`
+            <div class="p-3 rounded-2xl border ${n.read?'border-slate-200 bg-white':'border-emerald-200 bg-emerald-50'}">
+              <div class="flex items-start justify-between gap-3">
+                <div>
+                  <div class="text-sm font-semibold">${escapeHtml(n.title)}</div>
+                  <div class="text-xs text-slate-500 mt-0.5">${fmt.dt(n.time)} · ${pill(n.type||'info', n.read?'slate':'emerald')}</div>
+                </div>
+                <button class="tap text-xs px-2.5 py-1.5 rounded-xl border border-slate-200 hover:bg-slate-50" data-action="markRead" data-id="${escapeHtml(n.id)}">标记已读</button>
+              </div>
+              <div class="mt-2 text-sm text-slate-700">${escapeHtml(n.body)}</div>
+            </div>
+          `).join('') : `<div class="text-sm text-slate-500">暂无消息。</div>`}
+        </div>
+      `;
+      openModal({
+        title: '我的消息',
+        bodyHtml: body,
+        footerHtml: `
+          <div class="grid grid-cols-2 gap-2">
+            <button class="tap px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-sm font-semibold hover:bg-slate-50" data-action="markAllRead">全部已读</button>
+            <button class="tap px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">关闭</button>
+          </div>
+        `
+      });
+    }
+
+    function openWitnessModal(){
+      const w = store.user.witness || {status:'none'};
+      const status = w.status || 'none';
+      const statusPill = status==='approved' ? pill('已通过','emerald') : status==='pending' ? pill('审核中','amber') : status==='rejected' ? pill('未通过','rose') : pill('未认证','slate');
+
+      const body = `
+        <div class="p-3 rounded-2xl border border-slate-200 bg-slate-50">
+          <div class="text-sm font-semibold">见证人认证</div>
+          <div class="text-xs text-slate-600 mt-1">提交量化文件由平台后台审核；可协助求助信息核验、领取协助、爱心足迹标注，获得丰富奖励。</div>
+          <div class="mt-2">当前状态：${statusPill}</div>
+          ${status==='rejected' ? `<div class="mt-2 text-xs text-rose-700">未通过原因：${escapeHtml(w.reason||'（未填写）')}</div>`:''}
+        </div>
+
+        <div class="mt-3">
+          <div class="text-sm font-semibold">申请/更新材料</div>
+          <form id="witnessForm" class="mt-2 space-y-3">
+            <label class="block">
+              <div class="text-xs text-slate-600 mb-1">身份类型（示例）</div>
+              <select name="role" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm">
+                <option>乡村教师</option>
+                <option>大学生</option>
+                <option>快递员</option>
+                <option>宗教人士</option>
+                <option>社区工作者</option>
+                <option>其他</option>
+              </select>
+            </label>
+            <label class="block">
+              <div class="text-xs text-slate-600 mb-1">量化文件说明（演示）</div>
+              <textarea name="docs" rows="4" required placeholder="例如：工作证明、志愿时长、推荐信、服务记录链接..." class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"></textarea>
+            </label>
+            <div class="flex items-start gap-2">
+              <input id="wAgree" type="checkbox" required class="mt-1" />
+              <label for="wAgree" class="text-xs text-slate-600">我确认提交材料真实有效，同意平台审核与隐私保护条款（原型演示）。</label>
+            </div>
+            <div class="grid grid-cols-2 gap-2">
+              <button class="tap px-3 py-2.5 rounded-xl bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700" type="submit">提交审核</button>
+              <button class="tap px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-sm font-semibold hover:bg-slate-50" type="button" data-action="simulateWitnessApprove">模拟通过</button>
+            </div>
+
+            <div class="p-3 rounded-2xl border border-slate-200 bg-white">
+              <div class="text-sm font-semibold">申请记录（演示）</div>
+              <div class="text-xs text-slate-500 mt-1">审核周期：3-7 天（演示：可点击“模拟通过”/“模拟未通过”）</div>
+              <div class="mt-2 grid grid-cols-2 gap-2">
+                <button class="tap px-3 py-2 rounded-xl bg-rose-600 text-white text-xs font-semibold hover:bg-rose-700" type="button" data-action="simulateWitnessReject">模拟未通过</button>
+                <button class="tap px-3 py-2 rounded-xl bg-slate-900 text-white text-xs font-semibold hover:bg-slate-800" type="button" data-action="openTracks">查看爱心足迹</button>
+              </div>
+            </div>
+          </form>
+        </div>
+      `;
+
+      openModal({
+        title: '成为见证人',
+        bodyHtml: body,
+        footerHtml: `
+          <button class="tap w-full px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">关闭</button>
+        `
+      });
+    }
+
+    function openRewardsModal(){
+      const u = store.user;
+      const body = `
+        <div class="p-3 rounded-2xl border border-slate-200 bg-slate-50">
+          <div class="text-sm font-semibold">酬赏系统（演示）</div>
+          <div class="text-xs text-slate-600 mt-1">为捐助方与爱心使者提供多元化激励：荣誉证书、活动奖励、任务化奖励（如旅游）等。</div>
+        </div>
+
+        <div class="mt-3 grid grid-cols-3 gap-2">
+          <div class="p-3 rounded-2xl border border-slate-200 bg-white">
+            <div class="text-xs text-slate-500">爱心值</div>
+            <div class="mt-1 text-xl font-bold">${fmt.num(u.points||0)}</div>
+          </div>
+          <div class="p-3 rounded-2xl border border-slate-200 bg-white">
+            <div class="text-xs text-slate-500">勋章数</div>
+            <div class="mt-1 text-xl font-bold">${fmt.num((u.badges||[]).length)}</div>
+          </div>
+          <div class="p-3 rounded-2xl border border-slate-200 bg-white">
+            <div class="text-xs text-slate-500">任务</div>
+            <div class="mt-1 text-xl font-bold">3</div>
+          </div>
+        </div>
+
+        <div class="mt-3 ${cardShell(`
+          <div class="p-4">
+            <div class="text-sm font-semibold">可获得奖励（示例）</div>
+            <div class="mt-2 space-y-2">
+              ${rewardRow('发布一条规范求助信息', '+8 爱心值', 'gain8')}
+              ${rewardRow('完成一次认领并上传存证', '+12 爱心值', 'gain12')}
+              ${rewardRow('应急对接成功一次', '+15 爱心值', 'gain15')}
+            </div>
+          </div>
+        `,'')}
+        </div>
+
+        <div class="mt-3 p-3 rounded-2xl border border-slate-200 bg-white">
+          <div class="text-sm font-semibold">荣誉证书（示例）</div>
+          <div class="text-xs text-slate-500 mt-1">达到 100 爱心值可领取“公益行动派证书”（演示）。</div>
+          <div class="mt-3 flex gap-2">
+            <button class="tap flex-1 px-3 py-2.5 rounded-xl bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700" data-action="claimCert">领取证书</button>
+            <button class="tap px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-sm font-semibold hover:bg-slate-50" data-action="openBadges">查看勋章</button>
+          </div>
+        </div>
+      `;
+
+      openModal({ title:'酬赏系统', bodyHtml: body, footerHtml: `<button class="tap w-full px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">关闭</button>` });
+    }
+
+    function rewardRow(title, reward, action){
+      return `
+        <div class="p-3 rounded-2xl border border-slate-200 bg-white flex items-center justify-between gap-3">
+          <div>
+            <div class="text-sm font-semibold">${escapeHtml(title)}</div>
+            <div class="text-xs text-slate-500">奖励：${escapeHtml(reward)}</div>
+          </div>
+          <button class="tap text-xs px-2.5 py-1.5 rounded-xl bg-slate-900 text-white hover:bg-slate-800" data-action="${action}">领取</button>
+        </div>
+      `;
+    }
+
+    function openBadgesModal(){
+      const badges = store.user.badges || [];
+      const body = `
+        <div class="p-3 rounded-2xl border border-slate-200 bg-slate-50">
+          <div class="text-sm font-semibold">我的勋章</div>
+          <div class="text-xs text-slate-600 mt-1">勋章用于荣誉展示与激励；真实系统可与任务、活动、链上存证关联。</div>
+        </div>
+        <div class="mt-3 flex flex-wrap gap-2">
+          ${badges.length ? badges.map(b=>pill(b,'amber')).join('') : `<div class="text-sm text-slate-500">暂无勋章。</div>`}
+        </div>
+      `;
+      openModal({ title:'我的勋章', bodyHtml: body, footerHtml: `<button class="tap w-full px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">关闭</button>` });
+    }
+
+    function openAddressesModal(){
+      const list = store.addresses || [];
+      const body = `
+        <div class="p-3 rounded-2xl border border-slate-200 bg-slate-50">
+          <div class="text-sm font-semibold">我的地址（演示）</div>
+          <div class="text-xs text-slate-600 mt-1">支持历史地址便捷输入；可用于捐助发布、驿站中转等。</div>
+        </div>
+        <div class="mt-3 space-y-2">
+          ${list.map(a=>`
+            <div class="p-3 rounded-2xl border border-slate-200 bg-white">
+              <div class="flex items-start justify-between gap-3">
+                <div>
+                  <div class="text-sm font-semibold">${escapeHtml(a.label)} ${a.isDefault ? pill('默认','emerald'):''}</div>
+                  <div class="text-xs text-slate-500 mt-0.5">${escapeHtml(a.receiver)} · ${escapeHtml(a.phone)}</div>
+                  <div class="text-sm text-slate-700 mt-1">${escapeHtml(a.detail)}</div>
+                </div>
+                <div class="flex flex-col gap-2 items-end">
+                  <button class="tap text-xs px-2.5 py-1.5 rounded-xl border border-slate-200 hover:bg-slate-50" data-action="setDefaultAddr" data-id="${escapeHtml(a.id)}">设为默认</button>
+                  <button class="tap text-xs px-2.5 py-1.5 rounded-xl border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100" data-action="deleteAddr" data-id="${escapeHtml(a.id)}">删除</button>
+                </div>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+        <div class="mt-3">
+          <div class="text-sm font-semibold">新增地址</div>
+          <form id="addrForm" class="mt-2 space-y-2">
+            <div class="grid grid-cols-2 gap-2">
+              <input name="label" required placeholder="标签：家/公司" class="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" />
+              <input name="receiver" required placeholder="收件人" class="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" />
+            </div>
+            <div class="grid grid-cols-2 gap-2">
+              <input name="phone" required placeholder="电话" class="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" />
+              <label class="flex items-center gap-2 text-xs text-slate-600 px-3 py-2 rounded-xl border border-slate-200 bg-white">
+                <input name="isDefault" type="checkbox" /> 设为默认
+              </label>
+            </div>
+            <textarea name="detail" required rows="2" placeholder="详细地址" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"></textarea>
+            <button class="tap w-full px-3 py-2.5 rounded-xl bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700" type="submit">保存</button>
+          </form>
+        </div>
+      `;
+
+      openModal({ title:'我的地址', bodyHtml: body, footerHtml: `<button class="tap w-full px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">关闭</button>` });
+    }
+
+    function openNeedModal(id){
+      // Search in demoNeedCards + posted requests
+      const all = (store.demoNeedCards||[]).concat(store.posts.requests||[]);
+      const n = all.find(x=>x.id===id);
+      if(!n){
+        openModal({title:'需求不存在', bodyHtml:`<div class="text-sm text-slate-600">未找到该需求。</div>`});
+        return;
+      }
+
+      // Build trace timeline from ledger (best-effort)
+      const related = (store.ledger||[]).filter(tx=>{
+        const p = tx.payload || {};
+        return p.requestId===id || p.postId===id || p.needId===id;
+      }).slice(0, 20);
+
+      const body = `
+        <div class="rounded-2xl overflow-hidden border border-slate-200 bg-white">
+          ${n.cover ? `<img src="${escapeHtml(n.cover)}" class="w-full h-40 object-cover"/>` : `<div class="w-full h-40 bg-slate-100"></div>`}
+          <div class="p-4">
+            <div class="flex items-start justify-between gap-3">
+              <div>
+                <div class="text-base font-semibold">${escapeHtml(n.title)}</div>
+                <div class="text-xs text-slate-500 mt-1">${escapeHtml(n.location)} · ${escapeHtml(n.type)} · ${fmt.dt(n.createdAt||Date.now())}</div>
+              </div>
+              ${pill(n.verified?'已核验':'待核验', n.verified?'emerald':'slate')}
+            </div>
+            <div class="mt-2 flex flex-wrap gap-1.5">${pill(`紧急度：${n.urgency||'中'}`, urgencyTone(n.urgency||'中'))}${pill(`发布者：${n.createdBy||'匿名'}`,'slate')}${n.allowFeedback ? pill('可回馈','amber') : pill('不回馈','slate')}</div>
+            <div class="mt-3 text-sm text-slate-700 whitespace-pre-wrap">${escapeHtml(n.desc||'')}</div>
+            <div class="mt-4 flex gap-2">
+              <button class="tap flex-1 px-3 py-2.5 rounded-xl bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700" data-action="claimNeed" data-id="${escapeHtml(n.id)}">认领该求助</button>
+              <button class="tap px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-sm font-semibold hover:bg-slate-50" data-action="favorite" data-type="request" data-id="${escapeHtml(n.id)}">收藏</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="mt-3 p-4 rounded-2xl border border-slate-200 bg-white">
+          <div class="flex items-center justify-between">
+            <div class="text-sm font-semibold">链上追溯（与该需求相关）</div>
+            <button class="tap text-xs px-2.5 py-1.5 rounded-xl border border-slate-200 hover:bg-slate-50" data-action="openLedger">查看全部</button>
+          </div>
+          <div class="mt-2 text-xs text-slate-500">为保护隐私，真实系统可对敏感字段做脱敏/加密并分级公开。</div>
+          <div class="mt-3 space-y-2">
+            ${related.length ? related.map(tx=>`
+              <button class="tap w-full p-3 rounded-2xl border border-slate-200 bg-slate-50 text-left hover:bg-white" data-action="openTx" data-id="${escapeHtml(tx.id)}">
+                <div class="flex items-start justify-between gap-2">
+                  <div>
+                    <div class="text-sm font-semibold">${escapeHtml(tx.action)}</div>
+                    <div class="text-xs text-slate-500">${fmt.dt(tx.time)}</div>
+                  </div>
+                  <div class="text-xs font-mono text-slate-600">${escapeHtml(fmt.shortHash(tx.hash))}</div>
+                </div>
+              </button>
+            `).join('') : `<div class="text-sm text-slate-500">暂无关联记录。你可以点击“认领”，或在发布时会写入存证。</div>`}
+          </div>
+        </div>
+      `;
+
+      openModal({ title:'求助详情', bodyHtml: body, footerHtml: `<button class="tap w-full px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">关闭</button>` });
+    }
+
+    function openPostModal(kind, id){
+      const list = kind==='donation' ? (store.posts.donations||[]) : (store.posts.requests||[]);
+      const x = list.find(p=>p.id===id);
+      if(!x){
+        openModal({title:'记录不存在', bodyHtml:`<div class="text-sm text-slate-600">未找到该发布记录。</div>`});
+        return;
+      }
+      const body = `
+        <div class="p-3 rounded-2xl border border-slate-200 bg-slate-50">
+          <div class="text-sm font-semibold">${kind==='donation'?'捐助发布':'求助发布'} · ${escapeHtml(x.type||'')}</div>
+          <div class="text-xs text-slate-600 mt-1">${fmt.dt(x.createdAt)}</div>
+          <div class="mt-2">${pill(x.location||'未知地点','slate')}${kind==='request'?pill(`紧急度：${x.urgency||'中'}`, urgencyTone(x.urgency||'中')):''}</div>
+        </div>
+        <div class="mt-3 rounded-2xl border border-slate-200 bg-white overflow-hidden">
+          ${x.cover ? `<img src="${escapeHtml(x.cover)}" class="w-full h-36 object-cover"/>` : `<div class="w-full h-36 bg-slate-100"></div>`}
+          <div class="p-4">
+            <div class="text-base font-semibold">${escapeHtml(x.title||'')}</div>
+            <div class="mt-2 text-sm text-slate-700 whitespace-pre-wrap">${escapeHtml(x.desc||'')}</div>
+          </div>
+        </div>
+      `;
+      openModal({ title:'发布详情', bodyHtml: body, footerHtml: `
+        <div class="grid grid-cols-2 gap-2">
+          <button class="tap px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-sm font-semibold hover:bg-slate-50" data-action="openLedger">链上追溯</button>
+          <button class="tap px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">关闭</button>
+        </div>
+      ` });
+    }
+
+    function openClaimsModal(){
+      const claims = store.claims || [];
+      const body = `
+        <div class="p-3 rounded-2xl border border-slate-200 bg-slate-50">
+          <div class="text-sm font-semibold">认领记录</div>
+          <div class="text-xs text-slate-600 mt-1">可查看你认领的求助/爱心；真实系统可联动进展提醒、到期提醒与沟通。</div>
+        </div>
+        <div class="mt-3 space-y-2">
+          ${claims.length ? claims.map(c=>`
+            <div class="p-3 rounded-2xl border border-slate-200 bg-white">
+              <div class="flex items-start justify-between gap-3">
+                <div>
+                  <div class="text-sm font-semibold">${escapeHtml(c.title||'')}</div>
+                  <div class="text-xs text-slate-500 mt-0.5">${escapeHtml(c.location||'')} · ${fmt.dt(c.time)} · 状态：${escapeHtml(c.status||'进行中')}</div>
+                </div>
+                <button class="tap text-xs px-2.5 py-1.5 rounded-xl border border-slate-200 hover:bg-slate-50" data-action="uploadProof" data-id="${escapeHtml(c.id)}">上传存证</button>
+              </div>
+              <div class="mt-2 text-sm text-slate-600">${escapeHtml(c.note||'')}</div>
+            </div>
+          `).join('') : `<div class="text-sm text-slate-500">暂无认领记录。你可以在“首页”的求助信息中点击“认领”。</div>`}
+        </div>
+      `;
+      openModal({ title:'认领记录', bodyHtml: body, footerHtml: `<button class="tap w-full px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">关闭</button>` });
+    }
+
+    function openFavoritesModal(){
+      const favs = store.favorites || [];
+      const allNeeds = (store.demoNeedCards||[]).concat(store.posts.requests||[]);
+      const favNeeds = favs.filter(f=>f.type==='request').map(f=>allNeeds.find(n=>n.id===f.id)).filter(Boolean);
+      const body = `
+        <div class="p-3 rounded-2xl border border-slate-200 bg-slate-50">
+          <div class="text-sm font-semibold">我的收藏</div>
+          <div class="text-xs text-slate-600 mt-1">收藏的求助/项目会在此集中展示。</div>
+        </div>
+        <div class="mt-3 space-y-3">
+          ${favNeeds.length ? favNeeds.map(n=>needCard(n)).join('') : `<div class="text-sm text-slate-500">暂无收藏。去首页收藏一些求助信息吧。</div>`}
+        </div>
+      `;
+      openModal({ title:'我的收藏', bodyHtml: body, footerHtml: `<button class="tap w-full px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">关闭</button>` });
+    }
+
+    function openMyPostsModal(){
+      const body = `
+        <div class="p-3 rounded-2xl border border-slate-200 bg-slate-50">
+          <div class="text-sm font-semibold">我的发布</div>
+          <div class="text-xs text-slate-600 mt-1">这里汇总你发布的捐助信息与求助信息（演示）。</div>
+        </div>
+        <div class="mt-3 space-y-2">${renderMyPostsListFull()}</div>
+      `;
+      openModal({ title:'我的发布', bodyHtml: body, footerHtml: `<button class="tap w-full px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">关闭</button>` });
+    }
+
+    function renderMyPostsListFull(){
+      const items = [];
+      for(const d of (store.posts.donations||[])) items.push({ kind:'donation', ...d});
+      for(const r of (store.posts.requests||[])) items.push({ kind:'request', ...r});
+      items.sort((a,b)=> (b.createdAt||0) - (a.createdAt||0));
+      if(!items.length) return `<div class="text-sm text-slate-500">暂无发布记录。</div>`;
+      return items.map(x=>`
+        <div class="p-3 rounded-2xl border border-slate-200 bg-white">
+          <div class="flex items-start justify-between gap-3">
+            <div>
+              <div class="text-sm font-semibold">${escapeHtml(x.title||'')}</div>
+              <div class="text-xs text-slate-500 mt-0.5">${x.kind==='donation'?'捐助':'求助'} · ${escapeHtml(x.type||'')} · ${escapeHtml(x.location||'')} · ${fmt.dt(x.createdAt)}</div>
+            </div>
+            <div class="flex flex-col gap-2 items-end">
+              <button class="tap text-xs px-2.5 py-1.5 rounded-xl border border-slate-200 hover:bg-slate-50" data-action="openPost" data-kind="${x.kind}" data-id="${escapeHtml(x.id)}">查看</button>
+              <button class="tap text-xs px-2.5 py-1.5 rounded-xl border border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100" data-action="deletePost" data-kind="${x.kind}" data-id="${escapeHtml(x.id)}">删除</button>
+            </div>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function openSecurityModal(){
+      const body = `
+        <div class="space-y-3">
+          <div class="p-3 rounded-2xl border border-slate-200 bg-slate-50">
+            <div class="text-sm font-semibold">非功能需求说明（摘要）</div>
+            <div class="text-xs text-slate-600 mt-1">围绕透明度、性能、安全、易用性、兼容性做系统化设计（原型提示）。</div>
+          </div>
+
+          ${cardShell(`
+            <div class="p-4">
+              <div class="text-sm font-semibold">透明度与可追溯</div>
+              <ul class="mt-2 text-sm text-slate-700 list-disc pl-5 space-y-1">
+                <li>关键行为（发布、审核、匹配、签收、回馈）上链存证；不可篡改</li>
+                <li>捐助方/受捐方/平台审核人员可查看相关流程（分级公开）</li>
+              </ul>
+            </div>
+          `)}
+
+          ${cardShell(`
+            <div class="p-4">
+              <div class="text-sm font-semibold">安全性</div>
+              <ul class="mt-2 text-sm text-slate-700 list-disc pl-5 space-y-1">
+                <li>敏感信息加密存储、访问控制、脱敏展示</li>
+                <li>认证文件安全管理与审计</li>
+                <li>交易与防欺诈：规则引擎 + 风控 + 证据链</li>
+              </ul>
+            </div>
+          `)}
+
+          ${cardShell(`
+            <div class="p-4">
+              <div class="text-sm font-semibold">性能与并发</div>
+              <ul class="mt-2 text-sm text-slate-700 list-disc pl-5 space-y-1">
+                <li>应急场景：峰值并发与弹性扩容</li>
+                <li>数据加载加速：缓存、分页、异步队列处理</li>
+                <li>匹配效率：标签+地理+供需约束的匹配规则</li>
+              </ul>
+            </div>
+          `)}
+        </div>
+      `;
+
+      openModal({ title:'安全与合规说明', bodyHtml: body, footerHtml: `<button class="tap w-full px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">关闭</button>` });
+    }
+
+    function openEcomModal(){
+      const body = `
+        <div class="p-3 rounded-2xl border border-slate-200 bg-slate-50">
+          <div class="text-sm font-semibold">电商 API 打通（2.0 规划演示）</div>
+          <div class="text-xs text-slate-600 mt-1">快速对接电商平台：大众线上购买直接捐助，平台获取 CPS 佣金；需合规与发票/物流/验收联动。</div>
+        </div>
+
+        <div class="mt-3 space-y-2">
+          ${[
+            { name:'某电商 A', desc:'应急物资一键采购捐赠', cps:'CPS 2.5%' },
+            { name:'某电商 B', desc:'教育用品专区', cps:'CPS 1.8%' },
+            { name:'某电商 C', desc:'医疗合规用品专场', cps:'CPS 2.1%' },
+          ].map(p=>`
+            <div class="p-3 rounded-2xl border border-slate-200 bg-white flex items-start justify-between gap-3">
+              <div>
+                <div class="text-sm font-semibold">${escapeHtml(p.name)}</div>
+                <div class="text-xs text-slate-500 mt-0.5">${escapeHtml(p.desc)} · ${escapeHtml(p.cps)}</div>
+              </div>
+              <button class="tap text-xs px-2.5 py-1.5 rounded-xl bg-emerald-600 text-white hover:bg-emerald-700" data-action="simulateEcom">去购买捐助</button>
+            </div>
+          `).join('')}
+        </div>
+
+        <div class="mt-3 p-3 rounded-2xl border border-slate-200 bg-white">
+          <div class="text-sm font-semibold">对接建议（简）</div>
+          <ul class="mt-2 text-sm text-slate-700 list-disc pl-5 space-y-1">
+            <li>商品/订单/物流/签收回传</li>
+            <li>应急板块“所需清单”与电商 SKU 映射</li>
+            <li>链上存证：订单摘要、签收证据摘要</li>
+          </ul>
+        </div>
+      `;
+
+      openModal({ title:'电商捐助', bodyHtml: body, footerHtml: `<button class="tap w-full px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">关闭</button>` });
+    }
+
+    function openFeedbackModal(){
+      openModal({
+        title:'反馈建议',
+        bodyHtml: `
+          <div class="p-3 rounded-2xl border border-slate-200 bg-slate-50">
+            <div class="text-sm font-semibold">提交建议（演示）</div>
+            <div class="text-xs text-slate-600 mt-1">真实系统可联动工单、通知与版本迭代计划。</div>
+          </div>
+          <form id="feedbackForm" class="mt-3 space-y-3">
+            <input name="title" required placeholder="标题" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" />
+            <textarea name="body" required rows="5" placeholder="问题描述/建议/场景..." class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"></textarea>
+            <button class="tap w-full px-3 py-2.5 rounded-xl bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700" type="submit">提交</button>
+          </form>
+        `,
+        footerHtml: `<button class="tap w-full px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">关闭</button>`
+      });
+    }
+
+    function openSettingsModal(){
+      openModal({
+        title:'设置（演示）',
+        bodyHtml: `
+          <div class="space-y-3">
+            <div class="p-3 rounded-2xl border border-slate-200 bg-slate-50">
+              <div class="text-sm font-semibold">数据同步与兼容性</div>
+              <div class="text-xs text-slate-600 mt-1">支持 iOS/Android、公众号小程序与 APP 数据打通（演示说明）。</div>
+            </div>
+
+            ${cardShell(`
+              <div class="p-4">
+                <div class="text-sm font-semibold">通知设置</div>
+                <div class="mt-2 grid grid-cols-2 gap-2">
+                  <button class="tap px-3 py-2 rounded-xl bg-white border border-slate-200 text-sm font-semibold hover:bg-slate-50" data-action="simulateNotice">模拟新通知</button>
+                  <button class="tap px-3 py-2 rounded-xl bg-white border border-slate-200 text-sm font-semibold hover:bg-slate-50" data-action="markAllRead">全部已读</button>
+                </div>
+              </div>
+            `)}
+
+            ${cardShell(`
+              <div class="p-4">
+                <div class="text-sm font-semibold">隐私与安全</div>
+                <div class="text-xs text-slate-600 mt-1">认证文件、个人信息严格保护；链上仅存摘要或加密后的可验证数据。</div>
+                <div class="mt-3 grid grid-cols-2 gap-2">
+                  <button class="tap px-3 py-2 rounded-xl bg-white border border-slate-200 text-sm font-semibold hover:bg-slate-50" data-action="openSecurity">查看说明</button>
+                  <button class="tap px-3 py-2 rounded-xl bg-rose-600 text-white text-sm font-semibold hover:bg-rose-700" data-action="resetDemo">重置演示数据</button>
+                </div>
+              </div>
+            `)}
+          </div>
+        `,
+        footerHtml: `<button class="tap w-full px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">关闭</button>`
+      });
+    }
+
+    function openAboutModal(){
+      openModal({
+        title:'关于阿福公益',
+        bodyHtml: `
+          <div class="space-y-3">
+            <div class="rounded-2xl overflow-hidden border border-slate-200 bg-gradient-to-br from-emerald-600 via-sky-600 to-indigo-700 text-white">
+              <div class="p-5">
+                <div class="text-lg font-semibold">Web3 透明高效的捐赠信息枢纽</div>
+                <div class="text-sm opacity-90 mt-1">打造公益诚信系统，实现捐赠全程可追溯、信息互通，消除信息不对称。</div>
+              </div>
+            </div>
+
+            ${cardShell(`
+              <div class="p-4">
+                <div class="text-sm font-semibold">核心用户角色</div>
+                <ul class="mt-2 text-sm text-slate-700 list-disc pl-5 space-y-1">
+                  <li><strong>捐助方</strong>：个人/企业/机构，非现金捐助为主，参与排队，查看进展，获取荣誉与奖励</li>
+                  <li><strong>受捐方</strong>：个人/机构，发布求助，接收物资与服务，可选择回馈</li>
+                  <li><strong>爱心使者（见证人）</strong>：协助核验、领取与存证，爱心足迹，获得任务化奖励</li>
+                </ul>
+              </div>
+            `)}
+
+            ${cardShell(`
+              <div class="p-4">
+                <div class="text-sm font-semibold">版本路线图（示例）</div>
+                <ul class="mt-2 text-sm text-slate-700 list-disc pl-5 space-y-1">
+                  <li>2.0：电商 API 打通、运营数据报表</li>
+                  <li>3.0：爱心助力、服务类供给升级、任务与奖励体系强化</li>
+                  <li>国际化：多语言、跨国资源匹配能力预留</li>
+                </ul>
+              </div>
+            `)}
+          </div>
+        `,
+        footerHtml: `<button class="tap w-full px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">关闭</button>`
+      });
+    }
+
+    function openEnterpriseModal(){
+      openModal({
+        title:'企业/机构端口（原型）',
+        bodyHtml: `
+          <div class="p-3 rounded-2xl border border-slate-200 bg-slate-50">
+            <div class="text-sm font-semibold">企业账号与专属端口</div>
+            <div class="text-xs text-slate-600 mt-1">可在后台设立自有公益项目、发布服务供给、对接运营经费与双向宣传（演示）。</div>
+          </div>
+          <div class="mt-3 space-y-3">
+            ${cardShell(`
+              <div class="p-4">
+                <div class="text-sm font-semibold">创建企业公益项目（演示）</div>
+                <form id="enterpriseProjectForm" class="mt-2 space-y-2">
+                  <input name="title" required placeholder="项目名称" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" />
+                  <textarea name="desc" required rows="4" placeholder="项目目标/范围/预算（非现金公示）/执行方式" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"></textarea>
+                  <button class="tap w-full px-3 py-2.5 rounded-xl bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700" type="submit">创建项目</button>
+                </form>
+              </div>
+            `)}
+            ${cardShell(`
+              <div class="p-4">
+                <div class="text-sm font-semibold">服务类供给（3.0 规划）</div>
+                <div class="text-xs text-slate-600 mt-1">医疗/法务/支教等服务供给可纳入企业端口，统一审核、匹配与追溯。</div>
+                <div class="mt-3 flex gap-2">
+                  <button class="tap flex-1 px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="simulateServiceSupply">发布服务供给（演示）</button>
+                </div>
+              </div>
+            `)}
+          </div>
+        `,
+        footerHtml: `<button class="tap w-full px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">关闭</button>`
+      });
+    }
+
+    function openSearchModal(){
+      openModal({
+        title: '搜索/快捷',
+        bodyHtml: `
+          <div class="p-3 rounded-2xl border border-slate-200 bg-slate-50">
+            <div class="text-sm font-semibold">全局搜索（演示）</div>
+            <div class="text-xs text-slate-600 mt-1">搜索求助标题/地点/类型；也可快速打开排队、应急、链上。</div>
+          </div>
+
+          <div class="mt-3 flex gap-2">
+            <input id="globalSearchInput" placeholder="输入关键词…" class="flex-1 rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" value="${escapeHtml(ui.searchQuery||'')}" />
+            <button class="tap px-3 py-2 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="doSearch">搜索</button>
+          </div>
+
+          <div class="mt-3 grid grid-cols-3 gap-2">
+            <button class="tap p-3 rounded-2xl border border-slate-200 bg-white hover:bg-slate-50" data-action="openQueue">${icon('queue','w-5 h-5 text-slate-700')}<div class="text-sm font-semibold mt-1">排队</div></button>
+            <button class="tap p-3 rounded-2xl border border-slate-200 bg-white hover:bg-slate-50" data-action="openEmergency">${icon('bolt','w-5 h-5 text-slate-700')}<div class="text-sm font-semibold mt-1">应急</div></button>
+            <button class="tap p-3 rounded-2xl border border-slate-200 bg-white hover:bg-slate-50" data-action="openLedger">${icon('chain','w-5 h-5 text-slate-700')}<div class="text-sm font-semibold mt-1">链上</div></button>
+          </div>
+
+          <div id="searchResult" class="mt-3"></div>
+        `,
+        footerHtml: `<button class="tap w-full px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-sm font-semibold hover:bg-slate-50" data-action="closeModal">关闭</button>`
+      });
+
+      setTimeout(()=> $('#globalSearchInput')?.focus(), 50);
+    }
+
+    function doSearch(){
+      const q = ($('#globalSearchInput')?.value || '').trim();
+      ui.searchQuery = q;
+      const all = (store.demoNeedCards||[]).concat(store.posts.requests||[]);
+      const hit = !q ? [] : all.filter(n=>{
+        const hay = `${n.title||''} ${n.location||''} ${n.type||''} ${n.desc||''}`.toLowerCase();
+        return hay.includes(q.toLowerCase());
+      }).slice(0, 10);
+      const html = !q ? `<div class="text-sm text-slate-500">请输入关键词。</div>`
+        : hit.length ? `<div class="space-y-3">${hit.map(n=>needCard(n)).join('')}</div>`
+        : `<div class="text-sm text-slate-500">未找到匹配结果。</div>`;
+      $('#searchResult').innerHTML = html;
+    }
+
+    function openTrackModal(id){
+      const t = (store.loveTracks||[]).find(x=>x.id===id);
+      if(!t){
+        openModal({title:'足迹不存在', bodyHtml:`<div class="text-sm text-slate-600">未找到该足迹。</div>`});
+        return;
+      }
+      openModal({
+        title:'爱心足迹详情',
+        bodyHtml: `
+          <div class="p-3 rounded-2xl border border-slate-200 bg-slate-50">
+            <div class="text-sm font-semibold">${escapeHtml(t.title)}</div>
+            <div class="text-xs text-slate-600 mt-1">${escapeHtml(t.by)} · ${escapeHtml(t.location)} · ${fmt.dt(t.time)}</div>
+          </div>
+          <div class="mt-3 p-3 rounded-2xl border border-slate-200 bg-white">
+            <div class="text-sm text-slate-700">${escapeHtml(t.note)}</div>
+            <div class="mt-3 grid grid-cols-2 gap-2">
+              <button class="tap px-3 py-2 rounded-xl bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700" data-action="simulateTrackOnchain">一键存证上链</button>
+              <button class="tap px-3 py-2 rounded-xl bg-white border border-slate-200 text-sm font-semibold hover:bg-slate-50" data-action="openLedger">查看链上</button>
+            </div>
+          </div>
+          <div class="mt-3 text-xs text-slate-500">坐标（演示）：[${t.coords?.[0]}, ${t.coords?.[1]}]</div>
+        `,
+        footerHtml: `<button class="tap w-full px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">关闭</button>`
+      });
+    }
+
+    function openStationModal(id){
+      const s = (store.stations||[]).find(x=>x.id===id);
+      if(!s){
+        openModal({title:'驿站不存在', bodyHtml:`<div class="text-sm text-slate-600">未找到该驿站。</div>`});
+        return;
+      }
+      openModal({
+        title:'驿站对接',
+        bodyHtml: `
+          <div class="p-3 rounded-2xl border border-slate-200 bg-slate-50">
+            <div class="text-sm font-semibold">${escapeHtml(s.name)}</div>
+            <div class="text-xs text-slate-600 mt-1">城市：${escapeHtml(s.city)} · 状态：${escapeHtml(s.status)}</div>
+          </div>
+          <div class="mt-3 p-3 rounded-2xl border border-slate-200 bg-white">
+            <div class="text-sm font-semibold">可提供服务</div>
+            <div class="mt-2 flex flex-wrap gap-2">${(s.services||[]).map(x=>pill(x,'sky')).join('')}</div>
+            <div class="mt-3 text-xs text-slate-500">提示：真实系统可在此对接驿站负责人、预约中转、生成交接单与存证。</div>
+            <div class="mt-3 grid grid-cols-2 gap-2">
+              <button class="tap px-3 py-2 rounded-xl bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700" data-action="simulateStationDock">提交对接申请</button>
+              <button class="tap px-3 py-2 rounded-xl bg-white border border-slate-200 text-sm font-semibold hover:bg-slate-50" data-action="closeModal">稍后</button>
+            </div>
+          </div>
+        `,
+        footerHtml: `<button class="tap w-full px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">关闭</button>`
+      });
+    }
+
+    function openEditProfileModal(){
+      const u = store.user;
+      openModal({
+        title:'编辑资料',
+        bodyHtml: `
+          <form id="profileForm" class="space-y-3">
+            <label class="block">
+              <div class="text-xs text-slate-600 mb-1">昵称</div>
+              <input name="nickname" required class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" value="${escapeHtml(u.nickname||'')}" />
+            </label>
+            <label class="block">
+              <div class="text-xs text-slate-600 mb-1">个性签名</div>
+              <input name="signature" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm" value="${escapeHtml(u.signature||'')}" />
+            </label>
+            <div class="p-3 rounded-2xl border border-slate-200 bg-slate-50">
+              <div class="text-sm font-semibold">实名认证（演示）</div>
+              <div class="text-xs text-slate-600 mt-1">真实系统需对接权威实名认证服务，并严格保护身份信息。</div>
+              <div class="mt-2 grid grid-cols-2 gap-2">
+                <button class="tap px-3 py-2 rounded-xl bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700" type="button" data-action="simulateRealname">一键完成实名</button>
+                <button class="tap px-3 py-2 rounded-xl bg-white border border-slate-200 text-sm font-semibold hover:bg-slate-50" type="button" data-action="simulateUnrealname">设为未实名</button>
+              </div>
+            </div>
+            <button class="tap w-full px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" type="submit">保存</button>
+          </form>
+        `,
+        footerHtml: `<button class="tap w-full px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-sm font-semibold hover:bg-slate-50" data-action="closeModal">关闭</button>`
+      });
+    }
+
+    // ============ Actions ============
+    function seedDemoTx(){
+      const requestId = store.demoNeedCards?.[0]?.id || 'r_demo1';
+      addLedger({ action:'request.published', payload:{ requestId, by:'爱心使者·阿杰', location:'四川·凉山', type:'物资' }, visibility:'public' });
+      addLedger({ action:'audit.reviewed', payload:{ requestId, result:'pass', auditor:'平台审核员#07' }, visibility:'public' });
+      addLedger({ action:'match.queued', payload:{ requestId, rule:'fifo+tags', queue:'donor_queue' }, visibility:'public' });
+      addLedger({ action:'delivery.signed', payload:{ requestId, station:'阿福公益驿站·成都站', proof:'photo_hash_xxx' }, visibility:'public' });
+      addLedger({ action:'request.completed', payload:{ requestId, feedback:'土特产回赠（可选）' }, visibility:'public' });
+      addNotification({ title:'已生成示例链上记录', body:'你可以在“链上追溯”查看示例流程记录。', type:'system' });
+      render();
+    }
+
+    function joinQueue(){
+      const entries = store.queue.entries || [];
+      if(entries.some(e=>e.userId===store.user.id)){
+        addNotification({ title:'你已在队列中', body:'无需重复加入。', type:'info' });
+        openQueueModal();
+        return;
+      }
+      const e = { id: uid('q'), userId: store.user.id, nickname: store.user.nickname, type: '综合', createdAt: Date.now() };
+      store.queue.entries.push(e);
+      addLedger({ action:'queue.join', payload:{ userId: store.user.id, entryId: e.id }, visibility:'public' });
+      addNotification({ title:'已加入捐助者排队', body:'系统已记录你的排队顺序（演示：先到先服务）。', type:'queue' });
+      addPoints(3, '参与捐助者排队，维护公平秩序');
+      saveStore();
+      openQueueModal();
+      render();
+    }
+
+    function leaveQueue(){
+      const before = store.queue.entries.length;
+      store.queue.entries = store.queue.entries.filter(e=>e.userId!==store.user.id);
+      const after = store.queue.entries.length;
+      if(after!==before){
+        addLedger({ action:'queue.leave', payload:{ userId: store.user.id }, visibility:'public' });
+        addNotification({ title:'已退出排队', body:'你已从捐助者队列中移除。', type:'queue' });
+        saveStore();
+      }
+      openQueueModal();
+      render();
+    }
+
+    function favorite(type, id){
+      const exists = (store.favorites||[]).some(f=>f.type===type && f.id===id);
+      if(exists){
+        store.favorites = store.favorites.filter(f=> !(f.type===type && f.id===id));
+        addNotification({ title:'已取消收藏', body:'收藏已移除。', type:'info' });
+        addLedger({ action:'favorite.remove', payload:{ type, id, userId: store.user.id } });
+      } else {
+        store.favorites.push({ type, id, time: Date.now() });
+        addNotification({ title:'已收藏', body:'你可以在“我的-收藏”中查看。', type:'info' });
+        addLedger({ action:'favorite.add', payload:{ type, id, userId: store.user.id } });
+        addPoints(1, '收藏并关注公益信息');
+      }
+      saveStore();
+      render();
+      // Keep modal open; update UI if needed
+      if(!$('#modalRoot').classList.contains('hidden')){
+        // no-op
+      }
+    }
+
+    function claimNeed(id){
+      const all = (store.demoNeedCards||[]).concat(store.posts.requests||[]);
+      const n = all.find(x=>x.id===id);
+      if(!n){
+        addNotification({ title:'认领失败', body:'未找到该需求。', type:'error' });
+        return;
+      }
+      const c = {
+        id: uid('claim'),
+        needId: id,
+        title: n.title,
+        location: n.location,
+        time: Date.now(),
+        status: '进行中',
+        note: '已创建认领记录，可在“我的-认领记录”查看。'
+      };
+      store.claims.unshift(c);
+      addLedger({ action:'claim.create', payload:{ needId: id, claimId: c.id, userId: store.user.id }, visibility:'public' });
+      addNotification({ title:'认领成功', body:'已生成认领记录，请按流程完成交付与存证。', type:'progress' });
+      addPoints(5, '认领一条求助信息');
+      saveStore();
+      closeModal();
+      openClaimsModal();
+      render();
+    }
+
+    function uploadProofModal(claimId){
+      const c = (store.claims||[]).find(x=>x.id===claimId);
+      if(!c){
+        openModal({title:'记录不存在', bodyHtml:`<div class="text-sm text-slate-600">未找到该认领记录。</div>`});
+        return;
+      }
+      openModal({
+        title:'上传存证（演示）',
+        bodyHtml: `
+          <div class="p-3 rounded-2xl border border-slate-200 bg-slate-50">
+            <div class="text-sm font-semibold">${escapeHtml(c.title)}</div>
+            <div class="text-xs text-slate-600 mt-1">${escapeHtml(c.location)} · 状态：${escapeHtml(c.status)}</div>
+          </div>
+          <form id="proofForm" class="mt-3 space-y-3">
+            <input type="hidden" name="claimId" value="${escapeHtml(c.id)}" />
+            <label class="block">
+              <div class="text-xs text-slate-600 mb-1">存证说明</div>
+              <textarea name="note" rows="4" required placeholder="例如：签收照片已拍摄、快递单号、见证人核验..." class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm"></textarea>
+            </label>
+            <label class="block">
+              <div class="text-xs text-slate-600 mb-1">上传图片（本地演示，不上传）</div>
+              <input name="file" type="file" accept="image/*" class="w-full text-sm" />
+            </label>
+            <button class="tap w-full px-3 py-2.5 rounded-xl bg-emerald-600 text-white text-sm font-semibold hover:bg-emerald-700" type="submit">提交存证并上链</button>
+          </form>
+        `,
+        footerHtml: `<button class="tap w-full px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">关闭</button>`
+      });
+    }
+
+    function openFund(){
+      openModal({
+        title:'捐赠基金管理（占位）',
+        bodyHtml: `
+          <div class="p-3 rounded-2xl border border-amber-200 bg-amber-50">
+            <div class="text-sm font-semibold text-amber-800">平台不接受现金捐助（原型提示）</div>
+            <div class="text-xs text-amber-800/80 mt-1">此入口用于跳转到合规的“捐赠基金管理”系统/合作方。原型不提供真实支付。</div>
+          </div>
+          <div class="mt-3 p-3 rounded-2xl border border-slate-200 bg-white">
+            <div class="text-sm font-semibold">建议能力</div>
+            <ul class="mt-2 text-sm text-slate-700 list-disc pl-5 space-y-1">
+              <li>基金项目披露、资金流向公示、审计报告</li>
+              <li>与平台非现金捐助信息与进展联动</li>
+              <li>链上摘要存证与多方可验证</li>
+            </ul>
+          </div>
+        `,
+        footerHtml: `
+          <div class="grid grid-cols-2 gap-2">
+            <button class="tap px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-sm font-semibold hover:bg-slate-50" data-action="closeModal">关闭</button>
+            <button class="tap px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="simulateFundJump">模拟跳转</button>
+          </div>
+        `
+      });
+    }
+
+    function simulateFundJump(){
+      addLedger({ action:'fund.redirect', payload:{ userId: store.user.id, note:'跳转到基金管理端口（演示）' }, visibility:'public' });
+      addNotification({ title:'已模拟跳转基金管理', body:'原型不提供真实支付，请在真实系统中对接合规支付与基金管理。', type:'policy' });
+      closeModal();
+      render();
+    }
+
+    function simulateNeedVerify(){
+      // Mark most recent posted request as verified
+      const latest = store.posts.requests[0];
+      if(!latest){
+        addNotification({ title:'暂无可核验的求助', body:'请先发布一条求助信息。', type:'info' });
+        return;
+      }
+      latest.verified = true;
+      latest.createdBy = latest.createdBy || '受捐人·自发';
+      addLedger({ action:'witness.verify', payload:{ requestId: latest.id, witness:'爱心使者（演示）', result:'pass' }, visibility:'public' });
+      addNotification({ title:'模拟核验通过', body:'已将最近一条求助标记为“已核验”。', type:'progress' });
+      addPoints(4, '推动信息核验与透明度');
+      saveStore();
+      render();
+    }
+
+    function simulateWitnessApprove(){
+      store.user.witness = { status:'approved', submittedAt: store.user.witness?.submittedAt || Date.now(), reason:'' };
+      addLedger({ action:'witness.approved', payload:{ userId: store.user.id }, visibility:'public' });
+      addNotification({ title:'见证人审核通过（演示）', body:'你已获得见证人权限，可协助核验与存证。', type:'progress' });
+      addPoints(10, '成为爱心使者（见证人）');
+      saveStore();
+      openWitnessModal();
+      render();
+    }
+
+    function simulateWitnessReject(){
+      store.user.witness = { status:'rejected', submittedAt: store.user.witness?.submittedAt || Date.now(), reason:'缺少工作证明/志愿服务记录（演示）' };
+      addLedger({ action:'witness.rejected', payload:{ userId: store.user.id, reason: store.user.witness.reason }, visibility:'public' });
+      addNotification({ title:'见证人未通过（演示）', body:'可补充材料后再次提交。', type:'info' });
+      saveStore();
+      openWitnessModal();
+      render();
+    }
+
+    function simulateTrackOnchain(){
+      addLedger({ action:'track.onchain', payload:{ by: store.user.nickname, note:'爱心足迹存证（演示）' }, visibility:'public' });
+      addNotification({ title:'足迹已存证', body:'已写入链上记录（演示）。', type:'progress' });
+      addPoints(6, '完成一次爱心足迹存证');
+      saveStore();
+      render();
+    }
+
+    function simulateStationDock(){
+      addLedger({ action:'station.dock', payload:{ userId: store.user.id, note:'驿站对接申请（演示）' }, visibility:'public' });
+      addNotification({ title:'已提交驿站对接', body:'驿站负责人将与您沟通（演示）。', type:'progress' });
+      addPoints(2, '发起驿站对接');
+      saveStore();
+      closeModal();
+      render();
+    }
+
+    function simulateEcom(){
+      addLedger({ action:'ecom.redirect', payload:{ userId: store.user.id, note:'电商购买捐助跳转（演示）' }, visibility:'public' });
+      addNotification({ title:'已模拟电商购买捐助', body:'真实系统需对接订单/物流/签收回传与链上存证。', type:'info' });
+      addPoints(2, '浏览电商捐助入口');
+      saveStore();
+      render();
+    }
+
+    function simulateNotice(){
+      addNotification({ title:'新通知（演示）', body:'你的某条发布已收到平台审核留言，请及时查看。', type:'progress' });
+      saveStore();
+      render();
+    }
+
+    function simulateRealname(){
+      store.user.verifiedRealName = true;
+      store.user.realName = '某某（演示）';
+      addLedger({ action:'user.realname', payload:{ userId: store.user.id, status:'verified' }, visibility:'restricted' });
+      addNotification({ title:'实名认证完成（演示）', body:'已更新你的实名状态。', type:'progress' });
+      saveStore();
+      render();
+    }
+
+    function simulateUnrealname(){
+      store.user.verifiedRealName = false;
+      store.user.realName = '';
+      addLedger({ action:'user.realname', payload:{ userId: store.user.id, status:'unverified' }, visibility:'restricted' });
+      addNotification({ title:'已设为未实名（演示）', body:'你可以随时重新完成实名。', type:'info' });
+      saveStore();
+      render();
+    }
+
+    function claimCert(){
+      if((store.user.points||0) < 100){
+        addNotification({ title:'暂不可领取', body:'达到 100 爱心值后可领取证书（演示）。', type:'info' });
+        return;
+      }
+      if(!store.user.badges.includes('公益行动派证书')) store.user.badges.push('公益行动派证书');
+      addLedger({ action:'cert.claim', payload:{ userId: store.user.id, cert:'公益行动派证书' }, visibility:'public' });
+      addNotification({ title:'证书领取成功', body:'已发放“公益行动派证书”（演示）。', type:'reward' });
+      saveStore();
+      render();
+      openBadgesModal();
+    }
+
+    function gain8(){ addPoints(8, '完成任务：发布规范求助信息（演示领取）'); }
+    function gain12(){ addPoints(12, '完成任务：认领并上传存证（演示领取）'); }
+    function gain15(){ addPoints(15, '完成任务：应急对接成功（演示领取）'); }
+
+    function openNeedByFace(bid){
+      // map beneficiary tags to a random need
+      const all = (store.demoNeedCards||[]).concat(store.posts.requests||[]);
+      const pick = all[Math.floor(Math.random()*Math.max(1, all.length))];
+      if(pick) openNeedModal(pick.id);
+      else addNotification({ title:'暂无需求可展示', body:'请先发布一条求助信息。', type:'info' });
+    }
+
+    function toggleLang(){
+      ui.lang = (ui.lang==='zh') ? 'en' : 'zh';
+      store.i18n.lang = ui.lang;
+      addLedger({ action:'i18n.toggle', payload:{ lang: ui.lang, userId: store.user.id }, visibility:'public' });
+      addNotification({ title:'语言已切换（演示）', body:`当前语言：${ui.lang==='zh'?'中文':'EN'}（仅演示开关，内容仍以中文为主）。`, type:'system' });
+      saveStore();
+      render();
+    }
+
+    function openTracks(){
+      closeModal();
+      ui.tab = 'land';
+      ui.landFilter = 'tracks';
+      render();
+    }
+
+    function resetDemo(){
+      localStorage.removeItem(STORE_KEY);
+      store = loadStore();
+      ui.tab = 'home';
+      closeModal();
+      render();
+    }
+
+    function logout(){
+      resetDemo();
+      addNotification({ title:'已退出（演示）', body:'本地演示数据已清空。', type:'system' });
+      saveStore();
+      render();
+    }
+
+    function deletePost(kind, id){
+      if(kind==='donation') store.posts.donations = (store.posts.donations||[]).filter(p=>p.id!==id);
+      else store.posts.requests = (store.posts.requests||[]).filter(p=>p.id!==id);
+      addLedger({ action:'post.delete', payload:{ kind, id, userId: store.user.id }, visibility:'restricted' });
+      addNotification({ title:'已删除发布', body:'已从本地演示数据移除。', type:'info' });
+      saveStore();
+      openMyPostsModal();
+      render();
+    }
+
+    function exportLedger(){
+      const data = JSON.stringify(store.ledger||[], null, 2);
+      const blob = new Blob([data], {type:'application/json'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `afu-ledger-${Date.now()}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      addNotification({ title:'已导出链上记录', body:'ledger.json 已下载（演示）。', type:'system' });
+      saveStore();
+      render();
+    }
+
+    function copyText(text){
+      navigator.clipboard?.writeText(text).then(()=>{
+        addNotification({ title:'已复制', body:'内容已复制到剪贴板。', type:'system' });
+        saveStore();
+        render();
+      }).catch(()=>{
+        addNotification({ title:'复制失败', body:'浏览器可能不支持剪贴板 API。', type:'error' });
+        saveStore();
+        render();
+      });
+    }
+
+    // ============ Form Handlers ============
+    function handleDonateSubmit(fd){
+      const payload = Object.fromEntries(fd.entries());
+      const post = {
+        id: uid('d'),
+        type: payload.type,
+        title: payload.title?.trim(),
+        location: payload.location?.trim(),
+        cover: payload.cover?.trim(),
+        desc: payload.desc?.trim(),
+        deliver: payload.deliver,
+        addressId: payload.addressId || '',
+        createdAt: Date.now(),
+        createdBy: `捐助方·${store.user.nickname}`,
+        verified: false,
+      };
+      store.posts.donations.unshift(post);
+
+      addLedger({ action:'donation.published', payload:{ postId: post.id, type: post.type, location: post.location, deliver: post.deliver }, visibility:'public' });
+      addNotification({ title:'捐助发布成功', body:'平台将进行审核与匹配（演示）。', type:'progress' });
+      addPoints(6, '发布一条非现金捐助信息');
+
+      if(payload.queue==='yes'){
+        if(!(store.queue.entries||[]).some(e=>e.userId===store.user.id)){
+          store.queue.entries.push({ id: uid('q'), userId: store.user.id, nickname: store.user.nickname, type: post.type, createdAt: Date.now() });
+          addLedger({ action:'queue.auto_join', payload:{ userId: store.user.id, from:'donation.published', postId: post.id }, visibility:'public' });
+          addNotification({ title:'已自动加入排队', body:'你选择了参与排队，系统已记录顺序。', type:'queue' });
+          addPoints(2, '发布后自动加入排队');
+        }
+      }
+
+      saveStore();
+      render();
+      openModal({
+        title:'发布成功',
+        bodyHtml:`
+          <div class="p-3 rounded-2xl border border-emerald-200 bg-emerald-50">
+            <div class="text-sm font-semibold text-emerald-800">已发布捐助信息</div>
+            <div class="text-xs text-emerald-800/80 mt-1">你可以在“发布-我的发布”或“我的-我的发布”查看。</div>
+          </div>
+          <div class="mt-3">${kv('标题', escapeHtml(post.title))}${kv('地点', escapeHtml(post.location))}${kv('类型', escapeHtml(post.type))}</div>
+        `,
+        footerHtml:`
+          <div class="grid grid-cols-2 gap-2">
+            <button class="tap px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-sm font-semibold hover:bg-slate-50" data-action="openQueue">查看排队</button>
+            <button class="tap px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">完成</button>
+          </div>
+        `
+      });
+    }
+
+    function handleRequestSubmit(fd){
+      const payload = Object.fromEntries(fd.entries());
+      const post = {
+        id: uid('r'),
+        type: payload.type,
+        urgency: payload.urgency,
+        title: payload.title?.trim(),
+        location: payload.location?.trim(),
+        cover: payload.cover?.trim(),
+        desc: payload.desc?.trim(),
+        allowFeedback: payload.allowFeedback==='yes',
+        createdAt: Date.now(),
+        createdBy: `受捐方·${store.user.nickname}`,
+        verified: false,
+      };
+      store.posts.requests.unshift(post);
+
+      addLedger({ action:'request.published', payload:{ requestId: post.id, type: post.type, urgency: post.urgency, location: post.location }, visibility:'public' });
+      addNotification({ title:'求助发布成功', body:'平台将进行审核与匹配（演示）。', type:'progress' });
+      addPoints(8, '发布一条规范求助信息');
+
+      saveStore();
+      render();
+      openNeedModal(post.id);
+    }
+
+    function handleWitnessSubmit(fd){
+      const payload = Object.fromEntries(fd.entries());
+      store.user.witness = { status:'pending', submittedAt: Date.now(), reason:'' };
+      addLedger({ action:'witness.submitted', payload:{ userId: store.user.id, role: payload.role, docs: payload.docs }, visibility:'restricted' });
+      addNotification({ title:'已提交见证人审核', body:'预计 3-7 天完成审核（演示：可点击“模拟通过/未通过”）。', type:'progress' });
+      addPoints(3, '提交见证人材料');
+      saveStore();
+      openWitnessModal();
+      render();
+    }
+
+    function handleEmergencyPledge(fd){
+      const p = Object.fromEntries(fd.entries());
+      const pledge = {
+        id: uid('ep'),
+        eid: p.eid,
+        type: p.type,
+        amount: p.amount,
+        desc: p.desc,
+        by: store.user.nickname,
+        createdAt: Date.now(),
+        status: '待对接',
+      };
+      store.posts.emergencyPledges.unshift(pledge);
+      addLedger({ action:'emergency.pledge', payload:{ eid: p.eid, pledgeId: pledge.id, type: pledge.type, amount: pledge.amount, userId: store.user.id }, visibility:'public' });
+      addNotification({ title:'应急对接已提交', body:'平台将快速撮合并联系（演示）。', type:'progress' });
+      addPoints(10, '参与一次应急对接');
+      saveStore();
+      closeModal();
+      openEmergencyModal();
+      render();
+    }
+
+    function handleAddrSubmit(fd){
+      const p = Object.fromEntries(fd.entries());
+      const addr = { id: uid('addr'), label: p.label.trim(), receiver: p.receiver.trim(), phone: p.phone.trim(), detail: p.detail.trim(), isDefault: p.isDefault==='on', updatedAt: Date.now() };
+      if(addr.isDefault){
+        (store.addresses||[]).forEach(a=>a.isDefault=false);
+      }
+      store.addresses.unshift(addr);
+      addLedger({ action:'address.add', payload:{ userId: store.user.id, addressId: addr.id }, visibility:'restricted' });
+      addNotification({ title:'地址已保存', body:'可在发布捐助时一键引用。', type:'system' });
+      saveStore();
+      openAddressesModal();
+      render();
+    }
+
+    function setDefaultAddr(id){
+      (store.addresses||[]).forEach(a=>a.isDefault = (a.id===id));
+      addLedger({ action:'address.default', payload:{ userId: store.user.id, addressId: id }, visibility:'restricted' });
+      addNotification({ title:'已设为默认地址', body:'后续发布可更便捷。', type:'system' });
+      saveStore();
+      openAddressesModal();
+      render();
+    }
+
+    function deleteAddr(id){
+      store.addresses = (store.addresses||[]).filter(a=>a.id!==id);
+      if(!(store.addresses||[]).some(a=>a.isDefault) && store.addresses[0]) store.addresses[0].isDefault = true;
+      addLedger({ action:'address.delete', payload:{ userId: store.user.id, addressId: id }, visibility:'restricted' });
+      addNotification({ title:'已删除地址', body:'地址已移除。', type:'system' });
+      saveStore();
+      openAddressesModal();
+      render();
+    }
+
+    function handleFeedback(fd){
+      const p = Object.fromEntries(fd.entries());
+      addLedger({ action:'feedback.submit', payload:{ userId: store.user.id, title: p.title, body: p.body }, visibility:'restricted' });
+      addNotification({ title:'感谢你的反馈', body:'已提交建议（演示）。', type:'system' });
+      addPoints(2, '提交产品反馈建议');
+      saveStore();
+      closeModal();
+      render();
+    }
+
+    function handleProfile(fd){
+      const p = Object.fromEntries(fd.entries());
+      store.user.nickname = p.nickname.trim();
+      store.user.signature = p.signature.trim();
+      addLedger({ action:'user.profile.update', payload:{ userId: store.user.id, nickname: store.user.nickname }, visibility:'restricted' });
+      addNotification({ title:'资料已更新', body:'你的昵称/签名已保存。', type:'system' });
+      saveStore();
+      closeModal();
+      render();
+    }
+
+    function simulateServiceSupply(){
+      addLedger({ action:'enterprise.service.publish', payload:{ org:'某某企业（演示）', type:'法务/医疗/支教', note:'服务供给发布（演示）' }, visibility:'public' });
+      addNotification({ title:'已发布服务供给（演示）', body:'服务类供给将纳入 3.0 版本。', type:'system' });
+      addPoints(4, '发布服务供给（演示）');
+      saveStore();
+      render();
+    }
+
+    function handleEnterpriseProject(fd){
+      const p = Object.fromEntries(fd.entries());
+      addLedger({ action:'enterprise.project.create', payload:{ org:'某某企业（演示）', title: p.title, desc: p.desc }, visibility:'public' });
+      addNotification({ title:'企业公益项目已创建（演示）', body:'已写入链上摘要并进入后台审核流程（演示）。', type:'progress' });
+      addPoints(6, '创建企业公益项目（演示）');
+      saveStore();
+      closeModal();
+      render();
+    }
+
+    // ============ Rendering ============
+    function renderBottomNav(){
+      const html = TABS.map(t=>{
+        const active = ui.tab===t.key;
+        return `
+          <button class="tap px-2 py-2 rounded-2xl flex flex-col items-center gap-1 ${active?'bg-slate-900 text-white':'text-slate-600 hover:bg-slate-100'}" data-action="setTab" data-tab="${t.key}">
+            <div class="${active?'text-white':'text-slate-700'}">${icon(t.icon, 'w-5 h-5')}</div>
+            <div class="text-[11px] font-medium">${t.label}</div>
+          </button>
+        `;
+      }).join('');
+      $('#bottomNav').innerHTML = html;
+    }
+
+    function renderView(){
+      const view = $('#view');
+      if(ui.tab==='home') view.innerHTML = viewHome();
+      else if(ui.tab==='land') view.innerHTML = viewLand();
+      else if(ui.tab==='publish') view.innerHTML = viewPublish();
+      else view.innerHTML = viewMe();
+    }
+
+    function renderInboxDot(){
+      const unread = (store.notifications||[]).some(n=>!n.read);
+      $('#inboxDot').classList.toggle('hidden', !unread);
+    }
+
+    function renderNetBadge(){
+      const b = $('#netBadge');
+      const on = navigator.onLine;
+      b.textContent = on ? '在线（演示）' : '离线演示';
+      b.className = `text-[11px] px-2 py-0.5 rounded-full border ${on ? 'bg-emerald-50 text-emerald-700 border-emerald-200' : 'bg-slate-100 text-slate-600 border-slate-200'}`;
+    }
+
+    function render(){
+      renderNetBadge();
+      renderInboxDot();
+      renderBottomNav();
+      renderView();
+    }
+
+    // ============ Event Delegation ============
+    document.addEventListener('click', (e)=>{
+      const el = e.target.closest('[data-action]');
+      if(!el) return;
+      const action = el.dataset.action;
+
+      const map = {
+        closeModal,
+        openLedger: openLedgerModal,
+        openQueue: openQueueModal,
+        openEmergency: openEmergencyModal,
+        openFace: openFaceSearchModal,
+        openEcom: openEcomModal,
+        openSecurity: openSecurityModal,
+        openInbox: openInboxModal,
+        openWitness: openWitnessModal,
+        openRewards: openRewardsModal,
+        openBadges: openBadgesModal,
+        openAddresses: openAddressesModal,
+        openFeedback: openFeedbackModal,
+        openSettings: openSettingsModal,
+        openAbout: openAboutModal,
+        openEnterprise: openEnterpriseModal,
+        openFund,
+        simulateFundJump,
+        simulateNeedVerify,
+        simulateWitnessApprove,
+        simulateWitnessReject,
+        simulateTrackOnchain,
+        simulateStationDock,
+        simulateEcom,
+        simulateNotice,
+        simulateRealname,
+        simulateUnrealname,
+        seedDemoTx,
+        joinQueue,
+        leaveQueue,
+        toggleLang,
+        openTracks,
+        resetDemo,
+        logout,
+        exportLedger,
+        doSearch,
+        claimCert,
+        gain8,
+        gain12,
+        gain15,
+        simulateServiceSupply,
+      };
+
+      if(action==='setTab'){
+        setTab(el.dataset.tab);
+        return;
+      }
+      if(action==='setPublishMode'){
+        ui.publishMode = el.dataset.mode;
+        render();
+        return;
+      }
+      if(action==='setLandFilter'){
+        ui.landFilter = el.dataset.filter;
+        render();
+        return;
+      }
+      if(action==='goPublishDonate'){
+        ui.tab = 'publish';
+        ui.publishMode = 'donate';
+        closeModal();
+        render();
+        return;
+      }
+      if(action==='goPublishRequest'){
+        ui.tab = 'publish';
+        ui.publishMode = 'request';
+        closeModal();
+        render();
+        return;
+      }
+      if(action==='goLandTracks'){
+        ui.tab = 'land';
+        ui.landFilter = 'tracks';
+        closeModal();
+        render();
+        return;
+      }
+      if(action==='openNeed'){
+        openNeedModal(el.dataset.id);
+        return;
+      }
+      if(action==='claimNeed'){
+        claimNeed(el.dataset.id);
+        return;
+      }
+      if(action==='favorite'){
+        favorite(el.dataset.type, el.dataset.id);
+        return;
+      }
+      if(action==='openTx'){
+        openTxModal(el.dataset.id);
+        return;
+      }
+      if(action==='pledgeEmergency'){
+        openEmergencyPledgeModal(el.dataset.id);
+        return;
+      }
+      if(action==='openNeedByFace'){
+        openNeedByFace(el.dataset.id);
+        return;
+      }
+      if(action==='openTrack'){
+        openTrackModal(el.dataset.id);
+        return;
+      }
+      if(action==='openStation'){
+        openStationModal(el.dataset.id);
+        return;
+      }
+      if(action==='openPost'){
+        openPostModal(el.dataset.kind, el.dataset.id);
+        return;
+      }
+      if(action==='openClaims'){
+        openClaimsModal();
+        return;
+      }
+      if(action==='openFavorites'){
+        openFavoritesModal();
+        return;
+      }
+      if(action==='openMyPosts'){
+        openMyPostsModal();
+        return;
+      }
+      if(action==='uploadProof'){
+        uploadProofModal(el.dataset.id);
+        return;
+      }
+      if(action==='deletePost'){
+        deletePost(el.dataset.kind, el.dataset.id);
+        return;
+      }
+      if(action==='copyText'){
+        copyText(el.dataset.text);
+        return;
+      }
+      if(action==='markRead'){
+        const n = (store.notifications||[]).find(x=>x.id===el.dataset.id);
+        if(n){ n.read = true; saveStore(); renderInboxDot(); openInboxModal(); }
+        return;
+      }
+      if(action==='markAllRead'){
+        (store.notifications||[]).forEach(n=>n.read=true);
+        saveStore();
+        render();
+        // If modal open, refresh it
+        if(!$('#modalRoot').classList.contains('hidden')) openInboxModal();
+        return;
+      }
+      if(action==='setDefaultAddr'){
+        setDefaultAddr(el.dataset.id);
+        return;
+      }
+      if(action==='deleteAddr'){
+        deleteAddr(el.dataset.id);
+        return;
+      }
+      if(action==='openTrack'){ openTrackModal(el.dataset.id); return; }
+      if(action==='openStation'){ openStationModal(el.dataset.id); return; }
+      if(action==='editProfile'){ openEditProfileModal(); return; }
+
+      if(map[action]){
+        map[action]();
+        return;
+      }
+    });
+
+    document.addEventListener('submit', (e)=>{
+      const form = e.target;
+      if(form.id==='donateForm'){
+        e.preventDefault();
+        handleDonateSubmit(new FormData(form));
+        form.reset();
+        return;
+      }
+      if(form.id==='requestForm'){
+        e.preventDefault();
+        handleRequestSubmit(new FormData(form));
+        form.reset();
+        return;
+      }
+      if(form.id==='witnessForm'){
+        e.preventDefault();
+        handleWitnessSubmit(new FormData(form));
+        return;
+      }
+      if(form.id==='emergencyPledgeForm'){
+        e.preventDefault();
+        handleEmergencyPledge(new FormData(form));
+        return;
+      }
+      if(form.id==='addrForm'){
+        e.preventDefault();
+        handleAddrSubmit(new FormData(form));
+        return;
+      }
+      if(form.id==='feedbackForm'){
+        e.preventDefault();
+        handleFeedback(new FormData(form));
+        return;
+      }
+      if(form.id==='profileForm'){
+        e.preventDefault();
+        handleProfile(new FormData(form));
+        return;
+      }
+      if(form.id==='proofForm'){
+        e.preventDefault();
+        const fd = new FormData(form);
+        const claimId = fd.get('claimId');
+        const note = String(fd.get('note')||'');
+        const c = (store.claims||[]).find(x=>x.id===claimId);
+        if(c){
+          c.status = '已存证';
+          c.note = note;
+          addLedger({ action:'claim.proof', payload:{ claimId, needId: c.needId, note, userId: store.user.id }, visibility:'public' });
+          addNotification({ title:'存证已提交', body:'已写入链上记录（演示）。', type:'progress' });
+          addPoints(12, '完成一次认领存证');
+          saveStore();
+        }
+        closeModal();
+        openClaimsModal();
+        render();
+        return;
+      }
+      if(form.id==='faceForm'){
+        e.preventDefault();
+        const fd = new FormData(form);
+        const seedText = (fd.get('seed')||'').toString().trim();
+        const file = fd.get('file');
+        if(file && file.size){
+          const reader = new FileReader();
+          reader.onload = ()=>{
+            const seed = reader.result;
+            $('#faceResult').innerHTML = renderFaceResults(seed);
+            addLedger({ action:'face.search', payload:{ userId: store.user.id, method:'file', bytes:file.size }, visibility:'restricted' });
+            addNotification({ title:'已完成脸部搜索（演示）', body:'匹配结果已生成。真实系统需严格合规与隐私保护。', type:'system' });
+            addPoints(1, '尝试脸部搜索匹配');
+            saveStore();
+            render();
+          };
+          reader.readAsDataURL(file);
+          return;
+        }
+        const seed = seedText || ('seed:'+Date.now());
+        $('#faceResult').innerHTML = renderFaceResults(seed);
+        addLedger({ action:'face.search', payload:{ userId: store.user.id, method:'seed', seed: seedText || '(auto)' }, visibility:'restricted' });
+        addNotification({ title:'已完成脸部搜索（演示）', body:'匹配结果已生成。', type:'system' });
+        addPoints(1, '尝试脸部搜索匹配');
+        saveStore();
+        render();
+        return;
+      }
+      if(form.id==='enterpriseProjectForm'){
+        e.preventDefault();
+        handleEnterpriseProject(new FormData(form));
+        return;
+      }
+    });
+
+    // Header quick buttons
+    $('#btnInbox').addEventListener('click', ()=> openInboxModal());
+    $('#btnSearch').addEventListener('click', ()=> openSearchModal());
+
+    window.addEventListener('online', ()=>{ renderNetBadge(); });
+    window.addEventListener('offline', ()=>{ renderNetBadge(); });
+
+    // Initial render
+    render();
+
+    // Soft onboarding on first visit
+    (function firstRun(){
+      const key = STORE_KEY + '_onboarded';
+      if(localStorage.getItem(key)) return;
+      localStorage.setItem(key, '1');
+      openModal({
+        title:'欢迎使用阿福公益原型',
+        bodyHtml:`
+          <div class="p-3 rounded-2xl border border-slate-200 bg-slate-50">
+            <div class="text-sm font-semibold">你将看到的核心能力（原型演示）</div>
+            <ul class="mt-2 text-sm text-slate-700 list-disc pl-5 space-y-1">
+              <li>四大板块：首页 / 爱心福地 / 发布 / 我的</li>
+              <li>捐助者排队：维护公平秩序</li>
+              <li>突发应急：快速对接需求与资源</li>
+              <li>链上追溯：发布/认领/存证等行为写入本地“账本”模拟</li>
+              <li>见证人认证：提交材料→审核中→通过/未通过</li>
+              <li>趣味脸部搜索：相似匹配引导捐助（注意隐私合规）</li>
+            </ul>
+          </div>
+          <div class="mt-3 p-3 rounded-2xl border border-amber-200 bg-amber-50">
+            <div class="text-sm font-semibold text-amber-800">重要提示</div>
+            <div class="text-xs text-amber-800/80 mt-1">平台不直接接受现金捐助；本原型为离线演示，不涉及真实支付与真实链上交互。</div>
+          </div>
+        `,
+        footerHtml:`
+          <div class="grid grid-cols-2 gap-2">
+            <button class="tap px-3 py-2.5 rounded-xl bg-white border border-slate-200 text-sm font-semibold hover:bg-slate-50" data-action="seedDemoTx">生成示例链上记录</button>
+            <button class="tap px-3 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-semibold hover:bg-slate-800" data-action="closeModal">开始体验</button>
+          </div>
+        `
+      });
+    })();
+  </script>
+</body>
+</html>
